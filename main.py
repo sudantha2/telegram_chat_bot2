@@ -1,3 +1,4 @@
+
 from telegram import Update
 
 from telegram.ext import MessageHandler, filters
@@ -339,51 +340,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check for inbox variations
-    inbox_variations = ['ib', 'inbox', 'dm', 'inboss', 'inbos']
-    if any(word in text for word in inbox_variations):
-        user = message.from_user
-        user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
-        response = f"{user_mention} Inbox යන්න එපා කවුරුත් මෙයා නරක ළමයෙක් ඔයාලා නරක් වෙයි...🥲"
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=response,
-            parse_mode='HTML',
-            reply_to_message_id=message.message_id
-        )
-        return
+    
 
-    # Check for Doni variations
-    doni_variations = ['doni', 'done', 'donii', 'donee', 'dony', 'dooni']
-    if any(word in text.split() for word in doni_variations):
-        user = message.from_user
-        user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
-        response = f"{user_mention} ඇයි Doni කියන්නේ ඔයා එයාගේ අම්මද තාත්තද? 😒😞"
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=response,
-            parse_mode='HTML',
-            reply_to_message_id=message.message_id
-        )
-        return
+    
 
-    # Check for bad words
-    bad_words = ['kiss', 'ummah', 'hutta', 'umma', 'huta', 'කිස්', 'උම්මා', 'හුත්ත', 'hukahan', 'pakaya', 'cariya', 'kariya', 'cariyo', 'kariyo', 'htttp', 'ack', 'wesige', 'wesa', 'balla', 'hukanna', 'taukanna', 'uttige']
-    if any(word in text.lower() for word in bad_words):
-        user = message.from_user
-        user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
-        response = f"{user_mention} මෙවැනි වචන භාවිතා නොකරන්න. ❌"
-        
-        # Delete the bad word message
-        await message.delete()
-        
-        # Send warning
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=response,
-            parse_mode='HTML'
-        )
-        return
+    # Bad word filter removed
+    return
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not context.args:
@@ -456,12 +418,12 @@ async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
+
     # Check if the button was clicked by authorized user
     if str(query.from_user.id) != "8197285353":
         await query.answer("You are not authorized to use these buttons.")
         return
-        
+
     await query.answer()
 
     if query.data.startswith("user_"):
