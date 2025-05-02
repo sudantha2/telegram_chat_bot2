@@ -1,5 +1,8 @@
 
+
 from telegram import Update
+from datetime import datetime
+import asyncio
 
 from telegram.ext import MessageHandler, filters
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -55,6 +58,170 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
+
+    # Handle refresh command
+    if message.text and message.text.lower() == '.refresh':
+        # Send initial message
+        progress_msg = await context.bot.send_message(
+            chat_id=message.chat_id,
+            text="🔄 Bot is refreshing... 0%"
+        )
+
+        # Simulate progress
+        progress_values = [0, 20, 40, 60, 80, 100]
+        for i in progress_values:
+            try:
+                await progress_msg.edit_text(f"🔄 Bot is refreshing... {i}%")
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Progress update error: {e}")
+                continue
+
+        # Get chat administrators
+        admins = await context.bot.get_chat_administrators(message.chat_id)
+        admin_text = "👥 Admin List:\n"
+
+        for admin in admins:
+            status = ""
+            if admin.status == "creator":
+                status = " (Owner)"
+            elif admin.is_anonymous:
+                status = " (Co-Owner)"
+
+            admin_text += f"• <a href='tg://user?id={admin.user.id}'>{admin.user.first_name}</a>{status}\n"
+
+        # Get chat member count
+        chat = await context.bot.get_chat(message.chat_id)
+        member_count = await context.bot.get_chat_member_count(message.chat_id)
+
+        # Get recent members (last 24 hours)
+        now = datetime.now()
+        recent_members = sum(1 for member in context.bot_data.get('new_members', [])
+                           if (now - member['joined_at']).total_seconds() < 86400)
+
+        # Get left members count
+        left_count = context.bot_data.get('left_count', 0)
+
+        stats_text = f"\n📊 Statistics:\n" \
+                    f"• Total members: {member_count}\n" \
+                    f"• New members (24h): {recent_members}\n" \
+                    f"• Left members: {left_count}\n"
+
+        await progress_msg.edit_text(
+            admin_text + "\n✅ All users IDs successfully gathered." + stats_text,
+            parse_mode='HTML'
+        )
+        return
+
+    # Handle new chat members
+    if message.new_chat_members:
+        if 'new_members' not in context.bot_data:
+            context.bot_data['new_members'] = []
+
+        for new_member in message.new_chat_members:
+            if not new_member.is_bot:
+                context.bot_data['new_members'].append({
+                    'user_id': new_member.id,
+                    'joined_at': datetime.now()
+                })
+                user_mention = f"<a href='tg://user?id={new_member.id}'>{new_member.first_name}</a>"
+                welcome_msg = f"💓හලෝ {user_mention} crystal family group එකට ඔයාව සාදරයෙන් පිළිගන්නවා💫❤️‍🩹"
+
+                # Create welcome image with user's name
+                width, height = 512, 512
+                img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(img)
+
+                # Create gradient background
+                for y in range(height):
+                    for x in range(width):
+                        r = int(255 * (x / width))
+                        g = int(200 * (y / height))
+                        b = int(255 * ((x + y) / (width + height)))
+                        img.putpixel((x, y), (r, g, b, 255))
+
+                # Get user profile photo
+                try:
+                    user_photos = await context.bot.get_user_profile_photos(new_member.id, limit=1)
+                    if user_photos.photos:
+                        photo_file = await context.bot.get_file(user_photos.photos[0][0].file_id)
+                        photo_bytes = await photo_file.download_as_bytearray()
+                        profile_photo = Image.open(io.BytesIO(photo_bytes))
+
+                        # Resize and create circular mask
+                        size = 200  # Size of the circular photo
+                        profile_photo = profile_photo.resize((size, size))
+                        mask = Image.new('L', (size, size), 0)
+                        mask_draw = ImageDraw.Draw(mask)
+                        mask_draw.ellipse((0, 0, size, size), fill=255)
+
+                        # Apply circular mask
+                        output = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+                        output.paste(profile_photo, (0, 0))
+                        output.putalpha(mask)
+
+                        # Add decorative elements (hearts and stars)
+                        for _ in range(8):
+                            x = random.randint(0, width-20)
+                            y = random.randint(0, height-20)
+                            if random.choice([True, False]):
+                                # Draw heart
+                                heart_size = random.randint(15, 25)
+                                draw.ellipse([x, y, x + heart_size//2, y + heart_size//2], fill=(255, 192, 203, 200))
+                                draw.ellipse([x + heart_size//2, y, x + heart_size, y + heart_size//2], fill=(255, 192, 203, 200))
+                                draw.polygon([(x, y + heart_size//4), (x + heart_size//2, y + heart_size), 
+                                           (x + heart_size, y + heart_size//4)], fill=(255, 192, 203, 200))
+                            else:
+                                # Draw star
+                                star_size = random.randint(10, 20)
+                                draw.ellipse([x, y, x + star_size, y + star_size], fill=(255, 255, 200, 200))
+
+                        # Paste the circular profile photo at the top
+                        img.paste(output, (width//2 - size//2, 50), output)
+                except Exception as e:
+                    print(f"Error processing profile photo: {e}")
+
+                # Add user's name below profile picture
+                try:
+                    font_size = 60
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+                except:
+                    font = ImageFont.load_default()
+
+                text = new_member.first_name
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                x = (width - text_width) / 2
+                y = 50 + 200 + 30  # Profile pic position (50) + pic size (200) + spacing (30)
+
+                # Add text with glow effect
+                for offset in range(3):
+                    draw.text((x - offset, y), text, font=font, fill=(255, 255, 255, 100))
+                    draw.text((x + offset, y), text, font=font, fill=(255, 255, 255, 100))
+                    draw.text((x, y - offset), text, font=font, fill=(255, 255, 255, 100))
+                    draw.text((x, y + offset), text, font=font, fill=(255, 255, 255, 100))
+
+                draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+
+                # Convert to bytes
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                img_byte_arr.seek(0)
+
+                # Send welcome message and image
+                await context.bot.send_photo(
+                    chat_id=message.chat_id,
+                    photo=img_byte_arr,
+                    caption=welcome_msg,
+                    parse_mode='HTML'
+                )
+        return
+
+    # Track left members
+    if message.left_chat_member:
+        if not message.left_chat_member.is_bot:
+            context.bot_data['left_count'] = context.bot_data.get('left_count', 0) + 1
 
     # Delete message if user is muted
     if message.from_user.id in muted_users:
@@ -295,57 +462,7 @@ async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_to_message_id=reply_msg_id
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.text:
-        return
 
-    # First check if user is muted and delete their message
-    if message.from_user.id in muted_users:
-        await message.delete()
-        return
-
-    # Convert message to lowercase for case-insensitive comparison
-    text = message.text.lower()
-
-    # Check for .mute_list command
-    if text == '.mute_list':
-        await mute_list_command(update, context)
-        return
-
-    # Check for .mute command
-    if text.startswith('.mute'):
-        if str(message.from_user.id) != "8197285353":
-            return
-
-        # Check if it's a reply
-        if not message.reply_to_message:
-            return
-
-        # Get the user to mute
-        muted_user = message.reply_to_message.from_user
-        muted_users.add(muted_user.id)
-
-        # Delete the command message
-        await message.delete()
-
-        # Create clickable username mention
-        user_mention = f"<a href='tg://user?id={muted_user.id}'>{muted_user.first_name}</a>"
-
-        # Send mute notification
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=f"{user_mention} You are Mute now. Please contact Major admin to Unmute",
-            parse_mode='HTML'
-        )
-        return
-
-    
-
-    
-
-    # Bad word filter removed
-    return
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not context.args:
@@ -484,7 +601,7 @@ app.add_handler(CommandHandler("hello", hello_command))
 app.add_handler(CommandHandler("more", more_command))
 app.add_handler(CommandHandler("mute", mute_command))
 app.add_handler(CommandHandler("mute_list", mute_list_command))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler((filters.TEXT | filters.StatusUpdate.NEW_CHAT_MEMBERS) & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(button_callback))
 
 print("Bot is running...")
