@@ -296,13 +296,92 @@ async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    if not message or not message.text:
+    if not message:
         return
 
-    # First check if user is muted and delete their message
+    # Check for muted users
     if message.from_user.id in muted_users:
         await message.delete()
         return
+
+    # Handle group messages
+    if message.chat.type != 'private':
+        if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
+            # Forward replied message to private chat
+            user = message.from_user
+            user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+            
+            # Store message ID for future reference
+            reply_msg = await context.bot.send_message(
+                chat_id=8197285353,
+                text=f"Reply from {user_mention} in group:\n\nOriginal message: {message.reply_to_message.text}\n\nID:{message.message_id}",
+                parse_mode='HTML'
+            )
+            
+            # Forward the actual reply
+            await context.bot.forward_message(
+                chat_id=8197285353,
+                from_chat_id=message.chat_id,
+                message_id=message.message_id
+            )
+        return
+
+    # Handle private chat messages
+    try:
+        if message.reply_to_message:
+            # Check if this is a reply to a forwarded message
+            if "ID:" in message.reply_to_message.text:
+                original_id = int(message.reply_to_message.text.split("ID:")[-1].strip())
+                
+                # Send reply to group
+                if message.text:
+                    await context.bot.send_message(
+                        chat_id=-1002357656013,
+                        text=message.text,
+                        reply_to_message_id=original_id
+                    )
+                elif message.sticker:
+                    await context.bot.send_sticker(
+                        chat_id=-1002357656013,
+                        sticker=message.sticker.file_id,
+                        reply_to_message_id=original_id
+                    )
+                elif message.photo:
+                    await context.bot.send_photo(
+                        chat_id=-1002357656013,
+                        photo=message.photo[-1].file_id,
+                        caption=message.caption,
+                        reply_to_message_id=original_id
+                    )
+                await message.reply_text("✅ Sent reply to group!")
+                return
+        
+        # Forward regular messages to group
+        if message.text and not message.text.startswith('/'):
+            await context.bot.send_message(
+                chat_id=-1002357656013,
+                text=message.text
+            )
+        elif message.sticker:
+            await context.bot.send_sticker(
+                chat_id=-1002357656013,
+                sticker=message.sticker.file_id
+            )
+        elif message.photo:
+            await context.bot.send_photo(
+                chat_id=-1002357656013,
+                photo=message.photo[-1].file_id,
+                caption=message.caption
+            )
+        else:
+            await message.reply_text("❌ Message type not supported")
+            return
+            
+        await message.reply_text("✅ Forwarded to group!")
+        
+    except Exception as e:
+        print(f"Error handling message: {e}")
+        await message.reply_text("❌ Failed to process message")
 
     # Convert message to lowercase for case-insensitive comparison
     text = message.text.lower()
@@ -553,8 +632,23 @@ app.add_handler(CommandHandler("hello", hello_command))
 app.add_handler(CommandHandler("more", more_command))
 app.add_handler(CommandHandler("mute", mute_command))
 app.add_handler(CommandHandler("mute_list", mute_list_command))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler((filters.TEXT | filters.Sticker.ALL | filters.PHOTO) & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(button_callback))
 
-print("Bot is running...")
-app.run_polling()
+import signal
+import sys
+
+def signal_handler(sig, frame):
+    print('Stopping bot...')
+    app.stop_running()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+try:
+    print("Bot is running...")
+    app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
+except Exception as e:
+    print(f"Error running bot: {e}")
+    sys.exit(1)
