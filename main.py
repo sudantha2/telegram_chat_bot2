@@ -20,34 +20,40 @@ muted_users = set()
 
 # Define the mute command
 async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
+    try:
+        message = update.message
+        if not message:
+            return
 
-    # Check if command is from authorized user
-    if str(message.from_user.id) != "8197285353":
-        return
+        # Check if command is from authorized user
+        if str(message.from_user.id) != "8197285353":
+            return await message.reply_text("You are not authorized to use this command.")
 
-    # Check if it's a reply
-    if not message.reply_to_message:
-        return
+        # Check if it's a reply
+        if not message.reply_to_message:
+            return await message.reply_text("Please reply to a message to mute the user.")
 
-    # Get the user to mute
-    muted_user = message.reply_to_message.from_user
-    muted_users.add(muted_user.id)
+        # Get the user to mute
+        muted_user = message.reply_to_message.from_user
+        if muted_user.id in muted_users:
+            return await message.reply_text("This user is already muted.")
 
-    # Delete the command message
-    await message.delete()
+        muted_users.add(muted_user.id)
 
-    # Create clickable username mention
-    user_mention = f"<a href='tg://user?id={muted_user.id}'>{muted_user.first_name}</a>"
+        # Create clickable username mention
+        user_mention = f"<a href='tg://user?id={muted_user.id}'>{muted_user.first_name}</a>"
 
-    # Send mute notification
-    await context.bot.send_message(
-        chat_id=message.chat_id,
-        text=f"{user_mention} You are Mute now. Please contact Major admin to Unmute",
-        parse_mode='HTML'
-    )
+        # Send mute notification
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=f"{user_mention} has been muted. Contact admin to get unmuted.",
+            parse_mode='HTML'
+        )
+        
+        # Delete the command message
+        await message.delete()
+    except Exception as e:
+        print(f"Error in mute command: {e}")
 
 # Handle all messages to delete muted users' messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -383,45 +389,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error handling message: {e}")
         await message.reply_text("❌ Failed to process message")
 
-    # Convert message to lowercase for case-insensitive comparison
-    text = message.text.lower()
-
-    # Check for .delete command
-    if text == '.delete':
-        # Check if user is authorized
-        if str(message.from_user.id) == "8197285353":
-            # Check if it's a reply
-            if message.reply_to_message:
-                # Delete both messages
-                await message.delete()
-                await message.reply_to_message.delete()
-        return
-
-    # Check for .delete_all command
-    if text == '.delete_all':
-        # Check if user is authorized
-        if str(message.from_user.id) == "8197285353":
-            # Check if it's a reply
-            if message.reply_to_message:
-                target_user = message.reply_to_message.from_user
-                user_mention = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
-                
-                # Create confirmation buttons
-                keyboard = [
-                    [
-                        InlineKeyboardButton("✅ Confirm Delete All", callback_data=f"delete_all_{target_user.id}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data="delete_all_cancel")
-                    ]
-                ]
-                
-                await message.delete()
-                await context.bot.send_message(
-                    chat_id=message.chat_id,
-                    text=f"Are you sure you want to delete all messages from {user_mention}?",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='HTML'
-                )
-        return
+    
 
     # Check for .mute_list command
     if text == '.mute_list':
@@ -630,9 +598,62 @@ app.add_handler(CommandHandler("voice", voice_command))
 app.add_handler(CommandHandler("stick", stick_command))
 app.add_handler(CommandHandler("hello", hello_command))
 app.add_handler(CommandHandler("more", more_command))
-app.add_handler(CommandHandler("mute", mute_command))
-app.add_handler(CommandHandler("mute_list", mute_list_command))
+app.add_handler(MessageHandler(filters.Regex(r'^\.mute$'), mute_command))
+app.add_handler(MessageHandler(filters.Regex(r'^\.mute_list$'), mute_list_command))
 app.add_handler(MessageHandler((filters.TEXT | filters.Sticker.ALL | filters.PHOTO) & ~filters.COMMAND, handle_message))
+# Delete command handler
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        message = update.message
+        if not message:
+            return
+            
+        # Check if user is authorized
+        if str(message.from_user.id) != "8197285353":
+            return
+            
+        # Check if it's a reply
+        if message.reply_to_message:
+            await message.reply_to_message.delete()
+            await message.delete()
+        else:
+            await message.reply_text("Please reply to a message to delete it")
+    except Exception as e:
+        print(f"Error in delete command: {e}")
+
+# Delete all command handler
+async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+        
+    # Check if user is authorized
+    if str(message.from_user.id) != "8197285353":
+        return
+        
+    # Check if it's a reply
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+        user_mention = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
+        
+        # Create confirmation buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm Delete All", callback_data=f"delete_all_{target_user.id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="delete_all_cancel")
+            ]
+        ]
+        
+        await message.delete()
+        await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=f"Are you sure you want to delete all messages from {user_mention}?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+
+app.add_handler(MessageHandler(filters.Regex('^\.delete$'), delete_command))
+app.add_handler(MessageHandler(filters.Regex('^\.delete_all$'), delete_all_command))
 app.add_handler(CallbackQueryHandler(button_callback))
 
 import signal
