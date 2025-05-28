@@ -1,4 +1,5 @@
-from telegram import Update
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 
 from telegram.ext import MessageHandler, filters
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -17,6 +18,111 @@ TOKEN = os.environ['TOKEN']
 
 # Store muted users
 muted_users = set()
+
+# Group configurations
+GROUPS = {
+    "friends": {
+        "id": -1001361675429,
+        "name": "Friend's Hub"
+    },
+    "stf": {
+        "id": -1002654410642,
+        "name": "STF Family"
+    }
+}
+
+# Store pending messages for group selection
+pending_messages = {}
+
+# Store message counts
+message_counts = {
+    'daily': {},
+    'weekly': {},
+    'monthly': {}
+}
+
+import datetime
+
+def get_date_keys():
+    now = datetime.datetime.now()
+    today = now.strftime('%Y-%m-%d')
+    week = now.strftime('%Y-W%U')  # Year-Week format
+    month = now.strftime('%Y-%m')  # Year-Month format
+    return today, week, month
+
+def increment_message_count():
+    today, week, month = get_date_keys()
+    
+    # Initialize if not exists
+    if today not in message_counts['daily']:
+        message_counts['daily'][today] = 0
+    if week not in message_counts['weekly']:
+        message_counts['weekly'][week] = 0
+    if month not in message_counts['monthly']:
+        message_counts['monthly'][month] = 0
+    
+    # Increment counts
+    message_counts['daily'][today] += 1
+    message_counts['weekly'][week] += 1
+    message_counts['monthly'][month] += 1
+
+# Define the /cmd command
+async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+    
+    commands_text = """
+🤖 **Bot Commands List** 🤖
+
+**Admin Commands:**
+• `.mute` - Mute a user (reply to their message)
+• `.mute_list` - Show muted users list
+• `.delete` - Delete a message (reply to it)
+• `.delete_all` - Delete all messages from a user
+
+**General Commands:**
+• `/go <text>` - Send message as bot
+• `/voice <text>` - Convert text to voice (Sinhala)
+• `/stick <text>` - Create text sticker
+• `/hello <text>` - Create fancy hello sticker
+• `/more <count> <text>` - Repeat message multiple times
+• `/cmd` - Show this command list
+• `/mg_count` - Show message statistics
+
+**Features:**
+• Forward messages to groups via private chat
+• Reply to group messages via private chat
+• Auto-delete muted user messages
+
+Made with ❤️ for group management!
+    """
+    
+    await message.reply_text(commands_text, parse_mode='Markdown')
+
+# Define the /mg_count command
+async def mg_count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+    
+    today, week, month = get_date_keys()
+    
+    today_count = message_counts['daily'].get(today, 0)
+    weekly_count = message_counts['weekly'].get(week, 0)
+    monthly_count = message_counts['monthly'].get(month, 0)
+    
+    count_text = f"""
+📊 **Message Statistics** 📊
+
+📅 **Today**: {today_count} messages
+📺 **This Week**: {weekly_count} messages  
+📆 **This Month**: {monthly_count} messages
+
+🔥 Keep the conversation going! 🚀
+    """
+    
+    await message.reply_text(count_text, parse_mode='Markdown')
 
 # Define the mute command
 async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,7 +155,7 @@ async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"{user_mention} has been muted. Contact admin to get unmuted.",
             parse_mode='HTML'
         )
-        
+
         # Delete the command message
         await message.delete()
     except Exception as e:
@@ -305,6 +411,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
+    # Count message (only for non-command messages)
+    if not (message.text and message.text.startswith('/')):
+        increment_message_count()
+
     # Check for muted users
     if message.from_user.id in muted_users:
         await message.delete()
@@ -316,14 +426,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Forward replied message to private chat
             user = message.from_user
             user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
-            
+
             # Store message ID for future reference
             reply_msg = await context.bot.send_message(
                 chat_id=8197285353,
                 text=f"Reply from {user_mention} in group:\n\nOriginal message: {message.reply_to_message.text}\n\nID:{message.message_id}",
                 parse_mode='HTML'
             )
-            
+
             # Forward the actual reply
             await context.bot.forward_message(
                 chat_id=8197285353,
@@ -338,7 +448,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Check if this is a reply to a forwarded message
             if "ID:" in message.reply_to_message.text:
                 original_id = int(message.reply_to_message.text.split("ID:")[-1].strip())
-                
+
                 # Send reply to group
                 if message.text:
                     await context.bot.send_message(
@@ -361,43 +471,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 await message.reply_text("✅ Sent reply to group!")
                 return
-        
-        # Forward regular messages to group
-        if message.text and not message.text.startswith('/'):
-            await context.bot.send_message(
-                chat_id=-1002357656013,
-                text=message.text
-            )
-        elif message.sticker:
-            await context.bot.send_sticker(
-                chat_id=-1002357656013,
-                sticker=message.sticker.file_id
-            )
-        elif message.photo:
-            await context.bot.send_photo(
-                chat_id=-1002357656013,
-                photo=message.photo[-1].file_id,
-                caption=message.caption
-            )
-        else:
+
+        # Store message for group selection
+        message_id = message.message_id
+        pending_messages[message_id] = {
+            'type': 'text' if message.text else 'sticker' if message.sticker else 'photo' if message.photo else 'unsupported',
+            'content': message.text if message.text else message.sticker.file_id if message.sticker else message.photo[-1].file_id if message.photo else None,
+            'caption': message.caption if message.photo else None
+        }
+
+        # Check if message type is supported
+        if pending_messages[message_id]['type'] == 'unsupported':
             await message.reply_text("❌ Message type not supported")
+            del pending_messages[message_id]
             return
-            
-        await message.reply_text("✅ Forwarded to group!")
+
+        # Skip command messages
+        if message.text and message.text.startswith('/'):
+            del pending_messages[message_id]
+            return
+
+        # Create group selection buttons
+        keyboard = []
+        for group_key, group_info in GROUPS.items():
+            keyboard.append([InlineKeyboardButton(
+                text=group_info["name"],
+                callback_data=f"send_to_{group_key}_{message_id}"
+            )])
         
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{message_id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await message.reply_text(
+            "📤 Select which group to forward this message to:",
+            reply_markup=reply_markup
+        )
+
     except Exception as e:
         print(f"Error handling message: {e}")
         await message.reply_text("❌ Failed to process message")
 
-    
+
 
     # Check for .mute_list command
-    if text == '.mute_list':
+    if message.text == '.mute_list':
         await mute_list_command(update, context)
         return
 
     # Check for .mute command
-    if text.startswith('.mute'):
+    if message.text and message.text.startswith('.mute'):
         if str(message.from_user.id) != "8197285353":
             return
 
@@ -423,9 +545,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    
 
-    
+
+
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not context.args:
@@ -458,8 +580,6 @@ async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except ValueError:
         return  # Invalid number provided
-
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -498,15 +618,58 @@ async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
 
-    # Check if the button was clicked by authorized user
-    if str(query.from_user.id) != "8197285353":
+    # Handle group selection for message forwarding
+    if query.data.startswith("send_to_"):
+        parts = query.data.split("_")
+        group_key = parts[2]
+        message_id = int(parts[3])
+        
+        if message_id not in pending_messages:
+            await query.edit_message_text("❌ Message expired or already sent.")
+            return
+        
+        message_data = pending_messages[message_id]
+        group_info = GROUPS[group_key]
+        
+        try:
+            # Send message to selected group
+            if message_data['type'] == 'text':
+                await context.bot.send_message(
+                    chat_id=group_info["id"],
+                    text=message_data['content']
+                )
+            elif message_data['type'] == 'sticker':
+                await context.bot.send_sticker(
+                    chat_id=group_info["id"],
+                    sticker=message_data['content']
+                )
+            elif message_data['type'] == 'photo':
+                await context.bot.send_photo(
+                    chat_id=group_info["id"],
+                    photo=message_data['content'],
+                    caption=message_data['caption']
+                )
+            
+            await query.edit_message_text(f"✅ Message forwarded to {group_info['name']}!")
+            del pending_messages[message_id]
+        except Exception as e:
+            print(f"Error forwarding message: {e}")
+            await query.edit_message_text("❌ Failed to forward message.")
+    
+    elif query.data.startswith("cancel_"):
+        message_id = int(query.data.split("_")[1])
+        if message_id in pending_messages:
+            del pending_messages[message_id]
+        await query.edit_message_text("❌ Message forwarding cancelled.")
+
+    # Check if the button was clicked by authorized user for admin functions
+    elif str(query.from_user.id) != "8197285353":
         await query.answer("You are not authorized to use these buttons.")
         return
 
-    await query.answer()
-
-    if query.data.startswith("user_"):
+    elif query.data.startswith("user_"):
         user_id = int(query.data.split("_")[1])
         try:
             chat = await context.bot.get_chat(user_id)
@@ -536,29 +699,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"Error unmuting user: {e}")
 
     elif query.data.startswith("delete_all_"):
-        if str(query.from_user.id) != "8197285353":
-            await query.answer("You are not authorized to use this command.")
-            return
-            
         if query.data == "delete_all_cancel":
             await query.message.delete()
             return
-            
+
         user_id = int(query.data.split("_")[2])
         try:
             chat = await context.bot.get_chat(user_id)
             user_mention = f"<a href='tg://user?id={user_id}'>{chat.first_name}</a>"
-            
+
             # Delete the confirmation message
             await query.message.delete()
-            
+
             # Send processing message
             status_msg = await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=f"Deleting all messages from {user_mention}...",
                 parse_mode='HTML'
             )
-            
+
             # Here you would implement the actual message deletion
             # Note: Due to API limitations, we can only delete recent messages
             # Send completion message
@@ -570,7 +729,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"Error in delete_all: {e}")
             await query.message.edit_text("❌ Failed to delete messages.")
         return
-        
+
     elif query.data == "back":
         # Return to muted users list
         keyboard = []
@@ -593,6 +752,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text="No users are currently muted.")
 
 app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("cmd", cmd_command))
+app.add_handler(CommandHandler("mg_count", mg_count_command))
 app.add_handler(CommandHandler("go", go_command))
 app.add_handler(CommandHandler("voice", voice_command))
 app.add_handler(CommandHandler("stick", stick_command))
@@ -607,11 +768,11 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = update.message
         if not message:
             return
-            
+
         # Check if user is authorized
         if str(message.from_user.id) != "8197285353":
             return
-            
+
         # Check if it's a reply
         if message.reply_to_message:
             await message.reply_to_message.delete()
@@ -626,16 +787,16 @@ async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     message = update.message
     if not message:
         return
-        
+
     # Check if user is authorized
     if str(message.from_user.id) != "8197285353":
         return
-        
+
     # Check if it's a reply
     if message.reply_to_message:
         target_user = message.reply_to_message.from_user
         user_mention = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
-        
+
         # Create confirmation buttons
         keyboard = [
             [
@@ -643,7 +804,7 @@ async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 InlineKeyboardButton("❌ Cancel", callback_data="delete_all_cancel")
             ]
         ]
-        
+
         await message.delete()
         await context.bot.send_message(
             chat_id=message.chat_id,
