@@ -19,20 +19,42 @@ TOKEN = os.environ['TOKEN']
 # Store muted users
 muted_users = set()
 
-# Group configurations
-GROUPS = {
-    "friends": {
-        "id": -1001361675429,
-        "name": "Friend's Hub"
-    },
-    "stf": {
-        "id": -1002654410642,
-        "name": "STF Family"
-    }
-}
+# Store bot's groups (will be populated dynamically)
+GROUPS = {}
 
 # Store pending messages for group selection
 pending_messages = {}
+
+# Function to get all groups/chats the bot is in
+async def get_bot_groups(context):
+    """Get all groups the bot is a member of"""
+    global GROUPS
+    try:
+        # Get bot's chat memberships (this is limited by Telegram API)
+        # We'll use a different approach - store groups as bot encounters them
+        pass
+    except Exception as e:
+        print(f"Error getting bot groups: {e}")
+
+# Function to add/update group info when bot encounters a new group
+def add_group_info(chat_id, chat_title):
+    """Add group info to GROUPS dictionary"""
+    global GROUPS
+    # Use chat_id directly as key to ensure uniqueness
+    chat_key = str(chat_id)
+    
+    # Avoid duplicates and update if name changed
+    if chat_key not in GROUPS:
+        GROUPS[chat_key] = {
+            "id": chat_id,
+            "name": chat_title
+        }
+        print(f"Added new group: {chat_title} (ID: {chat_id})")
+    else:
+        # Update group name if it changed
+        if GROUPS[chat_key]["name"] != chat_title:
+            GROUPS[chat_key]["name"] = chat_title
+            print(f"Updated group name: {chat_title} (ID: {chat_id})")
 
 # Store message counts
 message_counts = {
@@ -169,6 +191,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
 
+    # Check for admin commands FIRST before any other processing
+    if message.text:
+        if message.text == '.delete':
+            await delete_command(update, context)
+            return
+            
+        if message.text == '.delete_all':
+            await delete_all_command(update, context)
+            return
+            
+        if message.text == '.mute_list':
+            await mute_list_command(update, context)
+            return
+
+        # Check for .mute command
+        if message.text.startswith('.mute'):
+            if str(message.from_user.id) != "8197285353":
+                return
+
+            # Check if it's a reply
+            if not message.reply_to_message:
+                return
+
+            # Get the user to mute
+            muted_user = message.reply_to_message.from_user
+            muted_users.add(muted_user.id)
+
+            # Delete the command message
+            await message.delete()
+
+            # Create clickable username mention
+            user_mention = f"<a href='tg://user?id={muted_user.id}'>{muted_user.first_name}</a>"
+
+            # Send mute notification
+            await context.bot.send_message(
+                chat_id=message.chat_id,
+                text=f"{user_mention} You are Mute now. Please contact Major admin to Unmute",
+                parse_mode='HTML'
+            )
+            return
+
     # Delete message if user is muted
     if message.from_user.id in muted_users:
         await message.delete()
@@ -180,6 +243,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle group messages
     if message.chat.type != 'private':
+        # Add this group to our GROUPS dictionary if not already there
+        if message.chat.type in ['group', 'supergroup']:
+            add_group_info(message.chat.id, message.chat.title)
+        
         if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
             # Forward replied message to private chat
             user = message.from_user
@@ -251,55 +318,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Create group selection buttons
         keyboard = []
-        for group_key, group_info in GROUPS.items():
-            keyboard.append([InlineKeyboardButton(
-                text=group_info["name"],
-                callback_data=f"send_to_{group_key}_{message_id}"
-            )])
+        if GROUPS:
+            for chat_id, group_info in GROUPS.items():
+                # Truncate group name if too long for display
+                display_name = group_info["name"]
+                if len(display_name) > 30:
+                    display_name = display_name[:27] + "..."
+                
+                keyboard.append([InlineKeyboardButton(
+                    text=display_name,
+                    callback_data=f"send_{chat_id}_{message_id}"
+                )])
 
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{message_id}")])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{message_id}")])
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await message.reply_text(
-            "📤 Select which group to forward this message to:",
-            reply_markup=reply_markup
-        )
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                f"📤 Select which group to forward this message to:\n(Found {len(GROUPS)} groups)",
+                reply_markup=reply_markup
+            )
+        else:
+            await message.reply_text(
+                "❌ No groups available. Bot needs to be active in groups first to detect them.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{message_id}")]])
+            )
 
     except Exception as e:
         print(f"Error handling message: {e}")
         await message.reply_text("❌ Failed to process message")
-
-    # Check for .mute_list command
-    if message.text == '.mute_list':
-        await mute_list_command(update, context)
-        return
-
-    # Check for .mute command
-    if message.text and message.text.startswith('.mute'):
-        if str(message.from_user.id) != "8197285353":
-            return
-
-        # Check if it's a reply
-        if not message.reply_to_message:
-            return
-
-        # Get the user to mute
-        muted_user = message.reply_to_message.from_user
-        muted_users.add(muted_user.id)
-
-        # Delete the command message
-        await message.delete()
-
-        # Create clickable username mention
-        user_mention = f"<a href='tg://user?id={muted_user.id}'>{muted_user.first_name}</a>"
-
-        # Send mute notification
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=f"{user_mention} You are Mute now. Please contact Major admin to Unmute",
-            parse_mode='HTML'
-        )
-        return
 
 
 
@@ -359,79 +405,87 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.delete()
 
     try:
-        # Detect language from text
-        detected_lang = detect(text)
+        # Check for Sinhala characters first (Unicode range for Sinhala)
+        sinhala_chars = any('\u0D80' <= char <= '\u0DFF' for char in text)
         
-        # Map detected languages to gTTS supported languages
-        lang_mapping = {
-            'en': 'en',     # English
-            'si': 'si',     # Sinhala
-            'hi': 'hi',     # Hindi
-            'ta': 'ta',     # Tamil
-            'ja': 'ja',     # Japanese
-            'ko': 'ko',     # Korean
-            'zh': 'zh',     # Chinese
-            'ar': 'ar',     # Arabic
-            'bn': 'bn',     # Bengali
-            'te': 'te',     # Telugu
-            'ml': 'ml',     # Malayalam
-            'kn': 'kn',     # Kannada
-            'gu': 'gu',     # Gujarati
-            'pa': 'pa',     # Punjabi
-            'ur': 'ur',     # Urdu
-            'ne': 'ne',     # Nepali
-            'th': 'th',     # Thai
-            'vi': 'vi',     # Vietnamese
-            'tr': 'tr',     # Turkish
-            'ru': 'ru',     # Russian
-            'fr': 'fr',     # French
-            'de': 'de',     # German
-            'es': 'es',     # Spanish
-            'it': 'it',     # Italian
-            'pt': 'pt',     # Portuguese
-            'nl': 'nl',     # Dutch
-            'sv': 'sv',     # Swedish
-            'no': 'no',     # Norwegian
-            'da': 'da',     # Danish
-            'fi': 'fi',     # Finnish
-            'pl': 'pl',     # Polish
-            'cs': 'cs',     # Czech
-            'sk': 'sk',     # Slovak
-            'hu': 'hu',     # Hungarian
-            'ro': 'ro',     # Romanian
-            'bg': 'bg',     # Bulgarian
-            'hr': 'hr',     # Croatian
-            'sr': 'sr',     # Serbian
-            'sl': 'sl',     # Slovenian
-            'et': 'et',     # Estonian
-            'lv': 'lv',     # Latvian
-            'lt': 'lt',     # Lithuanian
-            'uk': 'uk',     # Ukrainian
-            'be': 'be',     # Belarusian
-            'mk': 'mk',     # Macedonian
-            'sq': 'sq',     # Albanian
-            'mt': 'mt',     # Maltese
-            'cy': 'cy',     # Welsh
-            'ga': 'ga',     # Irish
-            'is': 'is',     # Icelandic
-            'eu': 'eu',     # Basque
-            'ca': 'ca',     # Catalan
-            'gl': 'gl',     # Galician
-            'af': 'af',     # Afrikaans
-            'sw': 'sw',     # Swahili
-            'zu': 'zu',     # Zulu
-            'xh': 'xh',     # Xhosa
-            'st': 'st',     # Sesotho
-            'tn': 'tn',     # Setswana
-            'ss': 'ss',     # Siswati
-            've': 've',     # Tshivenda
-            'ts': 'ts',     # Xitsonga
-            'nr': 'nr',     # Ndebele
-            'nso': 'nso',   # Northern Sotho
-        }
-        
-        # Get the appropriate language code, default to English if not supported
-        lang_code = lang_mapping.get(detected_lang, 'en')
+        if sinhala_chars:
+            lang_code = 'si'
+            print(f"Detected Sinhala text, using 'si' language code")
+        else:
+            # Detect language from text
+            detected_lang = detect(text)
+            print(f"Detected language: {detected_lang}")
+            
+            # Map detected languages to gTTS supported languages
+            lang_mapping = {
+                'en': 'en',     # English
+                'si': 'si',     # Sinhala
+                'hi': 'hi',     # Hindi
+                'ta': 'ta',     # Tamil
+                'ja': 'ja',     # Japanese
+                'ko': 'ko',     # Korean
+                'zh': 'zh',     # Chinese
+                'ar': 'ar',     # Arabic
+                'bn': 'bn',     # Bengali
+                'te': 'te',     # Telugu
+                'ml': 'ml',     # Malayalam
+                'kn': 'kn',     # Kannada
+                'gu': 'gu',     # Gujarati
+                'pa': 'pa',     # Punjabi
+                'ur': 'ur',     # Urdu
+                'ne': 'ne',     # Nepali
+                'th': 'th',     # Thai
+                'vi': 'vi',     # Vietnamese
+                'tr': 'tr',     # Turkish
+                'ru': 'ru',     # Russian
+                'fr': 'fr',     # French
+                'de': 'de',     # German
+                'es': 'es',     # Spanish
+                'it': 'it',     # Italian
+                'pt': 'pt',     # Portuguese
+                'nl': 'nl',     # Dutch
+                'sv': 'sv',     # Swedish
+                'no': 'no',     # Norwegian
+                'da': 'da',     # Danish
+                'fi': 'fi',     # Finnish
+                'pl': 'pl',     # Polish
+                'cs': 'cs',     # Czech
+                'sk': 'sk',     # Slovak
+                'hu': 'hu',     # Hungarian
+                'ro': 'ro',     # Romanian
+                'bg': 'bg',     # Bulgarian
+                'hr': 'hr',     # Croatian
+                'sr': 'sr',     # Serbian
+                'sl': 'sl',     # Slovenian
+                'et': 'et',     # Estonian
+                'lv': 'lv',     # Latvian
+                'lt': 'lt',     # Lithuanian
+                'uk': 'uk',     # Ukrainian
+                'be': 'be',     # Belarusian
+                'mk': 'mk',     # Macedonian
+                'sq': 'sq',     # Albanian
+                'mt': 'mt',     # Maltese
+                'cy': 'cy',     # Welsh
+                'ga': 'ga',     # Irish
+                'is': 'is',     # Icelandic
+                'eu': 'eu',     # Basque
+                'ca': 'ca',     # Catalan
+                'gl': 'gl',     # Galician
+                'af': 'af',     # Afrikaans
+                'sw': 'sw',     # Swahili
+                'zu': 'zu',     # Zulu
+                'xh': 'xh',     # Xhosa
+                'st': 'st',     # Sesotho
+                'tn': 'tn',     # Setswana
+                'ss': 'ss',     # Siswati
+                've': 've',     # Tshivenda
+                'ts': 'ts',     # Xitsonga
+                'nr': 'nr',     # Ndebele
+                'nso': 'nso',   # Northern Sotho
+            }
+            
+            # Get the appropriate language code, default to English if not supported
+            lang_code = lang_mapping.get(detected_lang, 'en')
         
         # Create temporary file for voice message
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
@@ -451,10 +505,17 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(tmp_file.name)
             
     except Exception as e:
-        # If language detection fails, fall back to English
+        # If language detection fails, fall back to Sinhala if text contains Sinhala characters, otherwise English
         print(f"Language detection failed: {e}")
+        
+        # Check for Sinhala characters as fallback
+        sinhala_chars = any('\u0D80' <= char <= '\u0DFF' for char in text)
+        fallback_lang = 'si' if sinhala_chars else 'en'
+        
+        print(f"Using fallback language: {fallback_lang}")
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
-            tts = gTTS(text=text, lang='en')
+            tts = gTTS(text=text, lang=fallback_lang)
             tts.save(tmp_file.name)
 
             with open(tmp_file.name, 'rb') as audio:
@@ -704,16 +765,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     # Handle group selection for message forwarding
-    if query.data.startswith("send_to_"):
-        parts = query.data.split("_")
-        group_key = parts[2]
-        message_id = int(parts[3])
+    if query.data.startswith("send_"):
+        parts = query.data.split("_", 2)  # Split into max 3 parts
+        group_key = parts[1]  # This is now the chat_id directly
+        message_id = int(parts[2])
 
         if message_id not in pending_messages:
             await query.edit_message_text("❌ Message expired or already sent.")
             return
 
         message_data = pending_messages[message_id]
+        if group_key not in GROUPS:
+            await query.edit_message_text("❌ Group not found.")
+            return
         group_info = GROUPS[group_key]
 
         try:
@@ -861,12 +925,24 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Check if it's a reply
         if message.reply_to_message:
+            # Delete the target message first
             await message.reply_to_message.delete()
+            # Then delete the command message
             await message.delete()
         else:
-            await message.reply_text("Please reply to a message to delete it")
+            # Send error message and delete the command
+            error_msg = await message.reply_text("Please reply to a message to delete it")
+            await message.delete()
+            # Delete error message after 3 seconds
+            await asyncio.sleep(3)
+            await error_msg.delete()
     except Exception as e:
         print(f"Error in delete command: {e}")
+        try:
+            # Still try to delete the command message even if target deletion failed
+            await message.delete()
+        except:
+            pass
 
 # Delete all command handler
 async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -899,8 +975,7 @@ async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode='HTML'
         )
 
-app.add_handler(MessageHandler(filters.Regex('^\.delete$'), delete_command))
-app.add_handler(MessageHandler(filters.Regex('^\.delete_all$'), delete_all_command))
+
 app.add_handler(CallbackQueryHandler(button_callback))
 
 import signal
