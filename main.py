@@ -1,4 +1,3 @@
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import MessageHandler, filters
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -42,7 +41,7 @@ def add_group_info(chat_id, chat_title):
     global GROUPS
     # Use chat_id directly as key to ensure uniqueness
     chat_key = str(chat_id)
-    
+
     # Avoid duplicates and update if name changed
     if chat_key not in GROUPS:
         GROUPS[chat_key] = {
@@ -111,6 +110,14 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • `/stick <text>` - Create text sticker
 • `/hello <text>` - Create fancy hello sticker
 • `/more <count> <text>` - Repeat message multiple times
+• `/weather <city>` - Get current weather for a city
+• `/weather_c <city>` - Get 5-day weather forecast for a city
+• `/ask <query>` - Get instant answers from DuckDuckGo
+• `/wiki <topic>` - Get Wikipedia summary for a topic
+• `/holidays <country_code> <year>` - Get public holidays for a country
+• `/movie <movie title>` - Get movie/series information
+• `/img <search query>` - Search for images from Pixabay
+• `/yt <search term>` - Search YouTube for videos
 • `/cmd` - Show this command list
 • `/mg_count` - Show message statistics
 
@@ -196,11 +203,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.text == '.delete':
             await delete_command(update, context)
             return
-            
+
         if message.text == '.delete_all':
             await delete_all_command(update, context)
             return
-            
+
         if message.text == '.mute_list':
             await mute_list_command(update, context)
             return
@@ -246,7 +253,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Add this group to our GROUPS dictionary if not already there
         if message.chat.type in ['group', 'supergroup']:
             add_group_info(message.chat.id, message.chat.title)
-        
+
         if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
             # Forward replied message to private chat
             user = message.from_user
@@ -324,7 +331,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 display_name = group_info["name"]
                 if len(display_name) > 30:
                     display_name = display_name[:27] + "..."
-                
+
                 keyboard.append([InlineKeyboardButton(
                     text=display_name,
                     callback_data=f"send_{chat_id}_{message_id}"
@@ -407,7 +414,7 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Check for Sinhala characters first (Unicode range for Sinhala)
         sinhala_chars = any('\u0D80' <= char <= '\u0DFF' for char in text)
-        
+
         if sinhala_chars:
             lang_code = 'si'
             print(f"Detected Sinhala text, using 'si' language code")
@@ -415,7 +422,7 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Detect language from text
             detected_lang = detect(text)
             print(f"Detected language: {detected_lang}")
-            
+
             # Map detected languages to gTTS supported languages
             lang_mapping = {
                 'en': 'en',     # English
@@ -483,10 +490,10 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'nr': 'nr',     # Ndebele
                 'nso': 'nso',   # Northern Sotho
             }
-            
+
             # Get the appropriate language code, default to English if not supported
             lang_code = lang_mapping.get(detected_lang, 'en')
-        
+
         # Create temporary file for voice message
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
             # Convert text to speech in detected language
@@ -503,17 +510,17 @@ async def voice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Clean up temporary file
             os.unlink(tmp_file.name)
-            
+
     except Exception as e:
         # If language detection fails, fall back to Sinhala if text contains Sinhala characters, otherwise English
         print(f"Language detection failed: {e}")
-        
+
         # Check for Sinhala characters as fallback
         sinhala_chars = any('\u0D80' <= char <= '\u0DFF' for char in text)
         fallback_lang = 'si' if sinhala_chars else 'en'
-        
+
         print(f"Using fallback language: {fallback_lang}")
-        
+
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
             tts = gTTS(text=text, lang=fallback_lang)
             tts.save(tmp_file.name)
@@ -725,6 +732,762 @@ async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return  # Invalid number provided
 
+# Define the /weather command
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if city name is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/weather <city>")
+        return
+
+    city = ' '.join(context.args)
+
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('OPENWEATHERMAP_API_KEY')
+        if not api_key:
+            await message.reply_text("❌ Weather service is not configured.")
+            return
+
+        # Make API request to OpenWeatherMap
+        url = f"https://api.openweathermap.org/data/2.5/weather"
+        params = {
+            'q': city,
+            'appid': api_key,
+            'units': 'metric'
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code == 404:
+            await message.reply_text(f"❌ City '{city}' not found. Please check the spelling and try again.")
+            return
+        elif response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch weather data. Please try again later.")
+            return
+
+        data = response.json()
+
+        # Extract weather information
+        city_name = data['name']
+        country = data['sys']['country']
+        condition = data['weather'][0]['description'].title()
+        weather_main = data['weather'][0]['main'].lower()
+        temp = round(data['main']['temp'])
+        feels_like = round(data['main']['feels_like'])
+        humidity = data['main']['humidity']
+        wind_speed = data['wind']['speed']
+
+        # Get weather emoji based on condition
+        weather_emoji = "🌤️"  # default
+        if "clear" in weather_main or "sunny" in weather_main:
+            weather_emoji = "☀️"
+        elif "cloud" in weather_main:
+            weather_emoji = "☁️"
+        elif "rain" in weather_main or "drizzle" in weather_main:
+            weather_emoji = "🌧️"
+        elif "thunderstorm" in weather_main or "storm" in weather_main:
+            weather_emoji = "⛈️"
+        elif "snow" in weather_main:
+            weather_emoji = "❄️"
+        elif "mist" in weather_main or "fog" in weather_main:
+            weather_emoji = "🌫️"
+        elif "wind" in weather_main:
+            weather_emoji = "💨"
+
+        # Get temperature emoji
+        temp_emoji = "🌡️"
+        if temp >= 30:
+            temp_emoji = "🔥"
+        elif temp >= 25:
+            temp_emoji = "🌡️"
+        elif temp >= 15:
+            temp_emoji = "🌡️"
+        elif temp >= 5:
+            temp_emoji = "🧊"
+        else:
+            temp_emoji = "❄️"
+
+        # Get humidity emoji
+        humidity_emoji = "💧"
+        if humidity >= 80:
+            humidity_emoji = "💦"
+        elif humidity >= 60:
+            humidity_emoji = "💧"
+        else:
+            humidity_emoji = "🏜️"
+
+        # Get wind speed emoji
+        wind_emoji = "🍃"
+        if wind_speed >= 10:
+            wind_emoji = "💨"
+        elif wind_speed >= 5:
+            wind_emoji = "🌬️"
+        else:
+            wind_emoji = "🍃"
+
+        # Format weather response with emojis
+        weather_text = f"""{weather_emoji} **Weather in {city_name}, {country}:**
+
+🌦️ **Condition:** {condition}
+{temp_emoji} **Temperature:** {temp}°C (Feels like {feels_like}°C)
+{humidity_emoji} **Humidity:** {humidity}%
+{wind_emoji} **Wind Speed:** {wind_speed} m/s"""
+
+        await message.reply_text(weather_text, parse_mode='Markdown')
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ Weather service is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to weather service. Please try again later.")
+    except KeyError:
+        await message.reply_text("❌ Invalid weather data received. Please try again.")
+    except Exception as e:
+        print(f"Error in weather command: {e}")
+        await message.reply_text("❌ An error occurred while fetching weather data.")
+
+# Define the /weather_c command for 5-day forecast
+async def weather_forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if city name is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/weather_c <city>")
+        return
+
+    city = ' '.join(context.args)
+
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('OPENWEATHERMAP_API_KEY')
+        if not api_key:
+            await message.reply_text("❌ Weather service is not configured.")
+            return
+
+        # Make API request for 5-day forecast
+        url = f"https://api.openweathermap.org/data/2.5/forecast"
+        params = {
+            'q': city,
+            'appid': api_key,
+            'units': 'metric'
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code == 404:
+            await message.reply_text(f"❌ City '{city}' not found for forecast.")
+            return
+        elif response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch forecast data.")
+            return
+
+        data = response.json()
+
+        # Extract forecast information
+        city_name = data['city']['name']
+        country = data['city']['country']
+        forecasts = data['list']
+
+        # Group forecasts by day (take one forecast per day at around noon)
+        daily_forecasts = []
+        seen_dates = set()
+
+        for forecast in forecasts:
+            forecast_time = forecast['dt_txt']
+            date = forecast_time.split(' ')[0]
+            hour = forecast_time.split(' ')[1]
+
+            # Take forecast around noon (12:00) for each day, or first available if noon not found
+            if date not in seen_dates and ('12:00' in hour or len(daily_forecasts) < 5):
+                if date not in seen_dates:
+                    seen_dates.add(date)
+                    daily_forecasts.append(forecast)
+
+                if len(daily_forecasts) >= 5:
+                    break
+
+        # Format forecast response
+        forecast_text = f"📅 **5-Day Weather Forecast for {city_name}, {country}:**\n\n"
+
+        for i, forecast in enumerate(daily_forecasts):
+            date_str = forecast['dt_txt'].split(' ')[0]
+            date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+            day_name = date_obj.strftime('%A')
+
+            condition = forecast['weather'][0]['description'].title()
+            weather_main = forecast['weather'][0]['main'].lower()
+            temp_max = round(forecast['main']['temp_max'])
+            temp_min = round(forecast['main']['temp_min'])
+            humidity = forecast['main']['humidity']
+            wind_speed = forecast['wind']['speed']
+
+            # Get weather emoji
+            weather_emoji = "🌤️"
+            if "clear" in weather_main or "sunny" in weather_main:
+                weather_emoji = "☀️"
+            elif "cloud" in weather_main:
+                weather_emoji = "☁️"
+            elif "rain" in weather_main or "drizzle" in weather_main:
+                weather_emoji = "🌧️"
+            elif "thunderstorm" in weather_main or "storm" in weather_main:
+                weather_emoji = "⛈️"
+            elif "snow" in weather_main:
+                weather_emoji = "❄️"
+            elif "mist" in weather_main or "fog" in weather_main:
+                weather_emoji = "🌫️"
+
+            forecast_text += f"{weather_emoji} **{day_name}** ({date_str})\n"
+            forecast_text += f"   🌦️ {condition}\n"
+            forecast_text += f"   🌡️ High: {temp_max}°C | Low: {temp_min}°C\n"
+            forecast_text += f"   💧 Humidity: {humidity}%\n"
+            forecast_text += f"   💨 Wind: {wind_speed} m/s\n\n"
+
+        await message.reply_text(forecast_text, parse_mode='Markdown')
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ Weather service is taking too long to respond.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to weather service.")
+    except Exception as e:
+        print(f"Error in weather forecast command: {e}")
+        await message.reply_text("❌ An error occurred while fetching forecast data.")
+
+# Define the /ask command for DuckDuckGo instant answers
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if query is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/ask <your question>")
+        return
+
+    query = ' '.join(context.args)
+
+    try:
+        # Make API request to DuckDuckGo Instant Answer API
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_redirect': '1',
+            'skip_disambig': '1'
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch answer from DuckDuckGo.")
+            return
+
+        data = response.json()
+
+        # Extract answer from response
+        answer_text = ""
+        answer_url = ""
+
+        # First try AbstractText
+        if data.get('AbstractText'):
+            answer_text = data['AbstractText']
+            answer_url = data.get('AbstractURL', '')
+
+        # Fallback to first RelatedTopic if AbstractText is empty
+        elif data.get('RelatedTopics') and len(data['RelatedTopics']) > 0:
+            first_topic = data['RelatedTopics'][0]
+            if isinstance(first_topic, dict) and first_topic.get('Text'):
+                answer_text = first_topic['Text']
+                answer_url = first_topic.get('FirstURL', '')
+
+        # If no meaningful answer found
+        if not answer_text:
+            await message.reply_text("Sorry, I couldn't find an instant answer for that.")
+            return
+
+        # Format response
+        response_text = f"🔍 **Answer for: {query}**\n\n{answer_text}"
+
+        # Add URL if available
+        if answer_url:
+            response_text += f"\n\n🔗 [More info]({answer_url})"
+
+        await message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ DuckDuckGo is taking too long to respond.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to DuckDuckGo service.")
+    except Exception as e:
+        print(f"Error in ask command: {e}")
+        await message.reply_text("❌ An error occurred while fetching the answer.")
+
+# Define the /holidays command for public holidays
+async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if country code and year are provided
+    if len(context.args) < 2:
+        await message.reply_text("❗ Please use the command like this:\n/holidays [country_code] [year]\n\nExample: /holidays US 2025")
+        return
+
+    country_code = context.args[0].upper()
+    try:
+        year = int(context.args[1])
+    except ValueError:
+        await message.reply_text("❗ Please provide a valid year.\nExample: /holidays US 2025")
+        return
+
+    # Validate year range
+    if year < 1900 or year > 2100:
+        await message.reply_text("❗ Please provide a year between 1900 and 2100.")
+        return
+
+    try:
+        # Make API request to Nager.Date API
+        url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/{country_code}"
+        
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 404:
+            # Suggest common country code alternatives
+            suggestions = {
+                'UK': 'GB', 'LK': 'LK', 'USA': 'US', 'INDIA': 'IN', 
+                'ENGLAND': 'GB', 'BRITAIN': 'GB', 'SRILANKA': 'LK'
+            }
+            suggestion = suggestions.get(country_code, None)
+            error_msg = f"❌ Country code '{country_code}' not found or no holidays available for {year}."
+            if suggestion and suggestion != country_code:
+                error_msg += f"\n💡 Try using '{suggestion}' instead of '{country_code}'"
+            error_msg += "\n\nCommon codes: US, GB, DE, IN, CA, AU, FR, IT, ES, JP"
+            await message.reply_text(error_msg)
+            return
+        elif response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch holiday data. Please try again later.")
+            return
+
+        data = response.json()
+
+        if not data:
+            await message.reply_text(f"❌ No public holidays found for {country_code} in {year}.")
+            return
+
+        # Get country flag emoji (basic mapping for common countries)
+        country_flags = {
+            'US': '🇺🇸', 'DE': '🇩🇪', 'IN': '🇮🇳', 'GB': '🇬🇧', 'FR': '🇫🇷', 
+            'IT': '🇮🇹', 'ES': '🇪🇸', 'CA': '🇨🇦', 'AU': '🇦🇺', 'JP': '🇯🇵',
+            'KR': '🇰🇷', 'CN': '🇨🇳', 'BR': '🇧🇷', 'MX': '🇲🇽', 'RU': '🇷🇺',
+            'ZA': '🇿🇦', 'EG': '🇪🇬', 'TR': '🇹🇷', 'SA': '🇸🇦', 'AE': '🇦🇪',
+            'SG': '🇸🇬', 'TH': '🇹🇭', 'MY': '🇲🇾', 'ID': '🇮🇩', 'PH': '🇵🇭',
+            'VN': '🇻🇳', 'LK': '🇱🇰', 'BD': '🇧🇩', 'PK': '🇵🇰', 'NP': '🇳🇵',
+            'NL': '🇳🇱', 'BE': '🇧🇪', 'CH': '🇨🇭', 'AT': '🇦🇹', 'SE': '🇸🇪',
+            'NO': '🇳🇴', 'DK': '🇩🇰', 'FI': '🇫🇮', 'PT': '🇵🇹', 'GR': '🇬🇷'
+        }
+        
+        country_flag = country_flags.get(country_code, '🏳️')
+
+        # Format response
+        holidays_text = f"{country_flag} **Public Holidays in {country_code} for {year}:**\n\n"
+
+        # Sort holidays by date
+        sorted_holidays = sorted(data, key=lambda x: x['date'])
+
+        for holiday in sorted_holidays:
+            date = holiday['date']
+            local_name = holiday.get('localName', holiday['name'])
+            name = holiday['name']
+            
+            # Use local name if different from English name, otherwise just use name
+            holiday_name = local_name if local_name != name else name
+            
+            holidays_text += f"📅 **{date}** - {holiday_name}\n"
+
+        # Split message if too long (Telegram limit is 4096 characters)
+        if len(holidays_text) > 4000:
+            # Send first part
+            first_part = holidays_text[:3900]
+            last_newline = first_part.rfind('\n')
+            if last_newline > 0:
+                first_part = first_part[:last_newline]
+            
+            await message.reply_text(first_part, parse_mode='Markdown')
+            
+            # Send remaining part
+            remaining = holidays_text[len(first_part):]
+            await message.reply_text(remaining, parse_mode='Markdown')
+        else:
+            await message.reply_text(holidays_text, parse_mode='Markdown')
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ Holiday service is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to holiday service. Please try again later.")
+    except Exception as e:
+        print(f"Error in holidays command: {e}")
+        await message.reply_text("❌ An error occurred while fetching holiday data.")
+
+# Define the /movie command for movie information
+async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if movie title is provided
+    if not context.args:
+        await message.reply_text("ℹ️ Usage: `/movie [movie title]`")
+        return
+
+    movie_title = ' '.join(context.args)
+
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('MOVIE_API_KEY')
+        if not api_key:
+            await message.reply_text("❌ Movie service is not configured.")
+            return
+
+        # Format movie title for URL (replace spaces with +)
+        formatted_title = movie_title.replace(' ', '+')
+
+        # Make API request to OMDb API
+        url = f"http://www.omdbapi.com/"
+        params = {
+            'apikey': api_key,
+            't': formatted_title
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch movie data. Please try again later.")
+            return
+
+        data = response.json()
+
+        # Check if movie was found
+        if data.get('Response') == 'False':
+            await message.reply_text(f'❌ No results found for "{movie_title}"')
+            return
+
+        # Extract movie information
+        title = data.get('Title', 'N/A')
+        year = data.get('Year', 'N/A')
+        imdb_rating = data.get('imdbRating', 'N/A')
+        genre = data.get('Genre', 'N/A')
+        plot = data.get('Plot', 'N/A')
+        director = data.get('Director', 'N/A')
+        actors = data.get('Actors', 'N/A')
+        language = data.get('Language', 'N/A')
+        poster_url = data.get('Poster', '')
+
+        # Format response
+        movie_text = f"""🎬 **Title:** {title}
+📆 **Year:** {year}
+⭐ **IMDb Rating:** {imdb_rating}
+🎭 **Genre:** {genre}
+🎞️ **Plot:** {plot}
+🎬 **Director:** {director}
+👥 **Actors:** {actors}
+🌐 **Language:** {language}"""
+
+        # Add poster if available and not "N/A"
+        if poster_url and poster_url != "N/A":
+            movie_text += f"\n🖼️ [Poster]({poster_url})"
+
+        await message.reply_text(movie_text, parse_mode='Markdown', disable_web_page_preview=True)
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ Movie service is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to movie service. Please try again later.")
+    except Exception as e:
+        print(f"Error in movie command: {e}")
+        await message.reply_text("❌ An error occurred while fetching movie data.")
+
+# Define the /img command for image search
+async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if search query is provided
+    if not context.args:
+        await message.reply_text("ℹ️ Usage: `/img [search query]`\n\nExample: `/img cute puppies`")
+        return
+
+    search_query = ' '.join(context.args)
+    await send_image_results(message, search_query, page=1)
+
+async def send_image_results(message, search_query, page=1):
+    """Send image search results with pagination"""
+    await send_image_results_to_chat(message.get_bot(), message.chat_id, search_query, page)
+
+async def send_image_results_to_chat(bot, chat_id, search_query, page=1):
+    """Send image search results to a specific chat"""
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('PIXABAY_API_KEY')
+        if not api_key:
+            await bot.send_message(chat_id, "❌ Image search service is not configured.")
+            return
+
+        # Make API request to Pixabay with pagination
+        url = "https://pixabay.com/api/"
+        params = {
+            'key': api_key,
+            'q': search_query,
+            'image_type': 'photo',
+            'per_page': 5,
+            'page': page,
+            'safesearch': 'true'
+        }
+
+        response = requests.get(url, params=params, timeout=10)
+
+        if response.status_code != 200:
+            await bot.send_message(chat_id, "❌ Unable to fetch images. Please try again later.")
+            return
+
+        data = response.json()
+
+        # Check if images were found
+        if not data.get('hits') or len(data['hits']) == 0:
+            if page == 1:
+                await bot.send_message(chat_id, f'Sorry, I couldn\'t find any images for "{search_query}".')
+            else:
+                await bot.send_message(chat_id, "No more images found.")
+            return
+
+        # Format response with images
+        images_text = f'🖼️ **Images for "{search_query}" (Page {page}):**\n\n'
+
+        for i, image in enumerate(data['hits'], 1):
+            image_url = image.get('webformatURL', image.get('largeImageURL', ''))
+            tags = image.get('tags', 'No tags available')
+            
+            # Limit tags length
+            if len(tags) > 50:
+                tags = tags[:47] + "..."
+            
+            images_text += f"{i}. [View Image]({image_url})\n   **Tags:** {tags}\n\n"
+
+        # Create pagination keyboard
+        keyboard = []
+        if page < 10 and len(data['hits']) == 5:  # Only show More/Next if we have more results and haven't reached limit
+            keyboard.append([InlineKeyboardButton("More ➡️", callback_data=f"img_next_{search_query}_{page + 1}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        
+        await bot.send_message(chat_id, images_text, parse_mode='Markdown', disable_web_page_preview=False, reply_markup=reply_markup)
+
+    except requests.exceptions.Timeout:
+        await bot.send_message(chat_id, "❌ Image service is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await bot.send_message(chat_id, "❌ Unable to connect to image service. Please try again later.")
+    except Exception as e:
+        print(f"Error in img command: {e}")
+        await bot.send_message(chat_id, "❌ An error occurred while searching for images.")
+
+# Define the /yt command for YouTube search
+async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if search term is provided
+    if not context.args:
+        await message.reply_text("ℹ️ Usage: `/yt [search term]`\n\nExample: `/yt python tutorial`")
+        return
+
+    search_term = ' '.join(context.args)
+
+    try:
+        # Get API key from environment
+        api_key = os.environ.get('YT_API_KEY')
+        if not api_key:
+            await message.reply_text("❌ YouTube API service is not configured.")
+            return
+
+        # Step 1: Search for videos
+        search_url = "https://www.googleapis.com/youtube/v3/search"
+        search_params = {
+            'part': 'snippet',
+            'q': search_term,
+            'type': 'video',
+            'maxResults': 1,
+            'order': 'relevance',
+            'key': api_key
+        }
+
+        search_response = requests.get(search_url, params=search_params, timeout=10)
+
+        if search_response.status_code != 200:
+            await message.reply_text("❌ Unable to search YouTube. Please try again later.")
+            return
+
+        search_data = search_response.json()
+
+        if not search_data.get('items'):
+            await message.reply_text(f"❌ No videos found for '{search_term}'")
+            return
+
+        video_item = search_data['items'][0]
+        video_id = video_item['id']['videoId']
+        channel_id = video_item['snippet']['channelId']
+
+        # Step 2: Get video statistics and details
+        video_url = "https://www.googleapis.com/youtube/v3/videos"
+        video_params = {
+            'part': 'statistics,snippet',
+            'id': video_id,
+            'key': api_key
+        }
+
+        video_response = requests.get(video_url, params=video_params, timeout=10)
+
+        if video_response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch video details.")
+            return
+
+        video_data = video_response.json()
+
+        if not video_data.get('items'):
+            await message.reply_text("❌ Video details not found.")
+            return
+
+        video_details = video_data['items'][0]
+
+        # Step 3: Get channel subscriber count
+        channel_url = "https://www.googleapis.com/youtube/v3/channels"
+        channel_params = {
+            'part': 'statistics',
+            'id': channel_id,
+            'key': api_key
+        }
+
+        channel_response = requests.get(channel_url, params=channel_params, timeout=10)
+
+        if channel_response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch channel details.")
+            return
+
+        channel_data = channel_response.json()
+
+        # Extract information
+        title = video_details['snippet']['title']
+        channel_name = video_details['snippet']['channelTitle']
+        thumbnail_url = video_details['snippet']['thumbnails'].get('high', {}).get('url', '')
+        video_url_link = f"https://www.youtube.com/watch?v={video_id}"
+
+        # Get statistics
+        view_count = video_details['statistics'].get('viewCount', 'N/A')
+        like_count = video_details['statistics'].get('likeCount', 'N/A')
+        
+        # Format numbers
+        if view_count != 'N/A':
+            view_count = f"{int(view_count):,}"
+        if like_count != 'N/A':
+            like_count = f"{int(like_count):,}"
+
+        # Get subscriber count
+        subscriber_count = 'N/A'
+        if channel_data.get('items'):
+            subscriber_count = channel_data['items'][0]['statistics'].get('subscriberCount', 'N/A')
+            if subscriber_count != 'N/A':
+                subscriber_count = f"{int(subscriber_count):,}"
+
+        # Format response
+        youtube_text = f"""🎥 **YouTube Search Results for "{search_term}":**
+
+📺 **Title:** {title}
+🎬 **Channel:** {channel_name}
+👁️ **Views:** {view_count}
+❤️ **Likes:** {like_count}
+👤 **Subscribers:** {subscriber_count}
+
+🔗 [Watch Video]({video_url_link})"""
+
+        # Add thumbnail if available
+        if thumbnail_url:
+            youtube_text += f"\n📷 [Thumbnail]({thumbnail_url})"
+
+        await message.reply_text(youtube_text, parse_mode='Markdown', disable_web_page_preview=False)
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ YouTube API is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to YouTube API. Please try again later.")
+    except Exception as e:
+        print(f"Error in yt command: {e}")
+        await message.reply_text("❌ An error occurred while searching YouTube.")
+
+# Define the /wiki command for Wikipedia summaries
+async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Check if topic is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/wiki <topic>")
+        return
+
+    topic = ' '.join(context.args)
+
+    try:
+        # Replace spaces with underscores for Wikipedia API
+        wiki_topic = topic.replace(' ', '_')
+
+        # Make API request to Wikipedia REST API
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_topic}"
+
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 404:
+            await message.reply_text(f"Sorry, I couldn't find any Wikipedia page for '{topic}'. Please try another query.")
+            return
+        elif response.status_code != 200:
+            await message.reply_text("❌ Unable to fetch Wikipedia data. Please try again later.")
+            return
+
+        data = response.json()
+
+        # Extract summary information
+        extract = data.get('extract', '')
+        page_url = data.get('content_urls', {}).get('desktop', {}).get('page', '')
+        title = data.get('title', topic)
+
+        if not extract:
+            await message.reply_text(f"Sorry, I couldn't find a summary for '{topic}'. Please try another query.")
+            return
+
+        # Truncate summary if too long (500 characters limit)
+        if len(extract) > 500:
+            extract = extract[:497] + "..."
+
+        # Format response
+        response_text = f"📖 **{title}**\n\n{extract}"
+
+        # Add Wikipedia link if available
+        if page_url:
+            response_text += f"\n\n🔗 [Read more on Wikipedia]({page_url})"
+
+        await message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
+
+    except requests.exceptions.Timeout:
+        await message.reply_text("❌ Wikipedia is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException:
+        await message.reply_text("❌ Unable to connect to Wikipedia. Please try again later.")
+    except Exception as e:
+        print(f"Error in wiki command: {e}")
+        await message.reply_text("❌ An error occurred while fetching Wikipedia data.")
+
 async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
@@ -763,6 +1526,22 @@ async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # Handle image pagination
+    if query.data.startswith("img_next_"):
+        parts = query.data.split("_", 3)  # Split into max 4 parts: img_next_query_page
+        search_query = parts[2]
+        page = int(parts[3])
+        
+        # Store chat_id before deleting the message
+        chat_id = query.message.chat_id
+        
+        # Delete the current message
+        await query.message.delete()
+        
+        # Send next page results to the chat
+        await send_image_results_to_chat(context.bot, chat_id, search_query, page)
+        return
 
     # Handle group selection for message forwarding
     if query.data.startswith("send_"):
@@ -907,6 +1686,14 @@ app.add_handler(CommandHandler("voice", voice_command))
 app.add_handler(CommandHandler("stick", stick_command))
 app.add_handler(CommandHandler("hello", hello_command))
 app.add_handler(CommandHandler("more", more_command))
+app.add_handler(CommandHandler("weather", weather_command))
+app.add_handler(CommandHandler("weather_c", weather_forecast_command))
+app.add_handler(CommandHandler("ask", ask_command))
+app.add_handler(CommandHandler("wiki", wiki_command))
+app.add_handler(CommandHandler("holidays", holidays_command))
+app.add_handler(CommandHandler("movie", movie_command))
+app.add_handler(CommandHandler("img", img_command))
+app.add_handler(CommandHandler("yt", yt_command))
 
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute$'), mute_command))
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute_list$'), mute_list_command))
@@ -945,6 +1732,7 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 # Delete all command handler
+
 async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
