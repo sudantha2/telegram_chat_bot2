@@ -1,19 +1,86 @@
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import MessageHandler, filters
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from keep_alive import keep_alive
 import os
+import sys
 from PIL import Image, ImageDraw, ImageFont
 import random
 import io
 import requests
 import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Start the Replit web server to keep the bot alive
 keep_alive()
 
 # Get the bot token from Replit Secrets
 TOKEN = os.environ['TOKEN']
+
+# MongoDB connection
+MONGO_URI = os.environ.get('MONGO_URI')
+if not MONGO_URI:
+    print("ERROR: MONGO_URI environment variable not found!")
+    print("Please add MONGO_URI to your secrets in the Replit environment.")
+    sys.exit(1)
+
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+db = mongo_client.telegram_bot
+filters_collection = db.filters
+
+# Filter management functions
+async def save_filter(chat_id, keyword, reply_type, reply_content):
+    """Save a filter to MongoDB"""
+    try:
+        filter_doc = {
+            "chat_id": chat_id,
+            "keyword": keyword.lower(),
+            "reply_type": reply_type,
+            "reply_content": reply_content
+        }
+        # Replace existing filter with same keyword and chat_id
+        await filters_collection.replace_one(
+            {"chat_id": chat_id, "keyword": keyword.lower()},
+            filter_doc,
+            upsert=True
+        )
+        return True
+    except Exception as e:
+        print(f"Error saving filter: {e}")
+        return False
+
+async def delete_filter(chat_id, keyword):
+    """Delete a filter from MongoDB"""
+    try:
+        result = await filters_collection.delete_one({
+            "chat_id": chat_id,
+            "keyword": keyword.lower()
+        })
+        return result.deleted_count > 0
+    except Exception as e:
+        print(f"Error deleting filter: {e}")
+        return False
+
+async def get_filters(chat_id):
+    """Get all filters for a chat"""
+    try:
+        cursor = filters_collection.find({"chat_id": chat_id})
+        return await cursor.to_list(length=None)
+    except Exception as e:
+        print(f"Error getting filters: {e}")
+        return []
+
+async def get_filter_by_keyword(chat_id, keyword):
+    """Get a specific filter by keyword"""
+    try:
+        return await filters_collection.find_one({
+            "chat_id": chat_id,
+            "keyword": keyword.lower()
+        })
+    except Exception as e:
+        print(f"Error getting filter: {e}")
+        return None
 
 # Store muted users
 muted_users = set()
@@ -120,6 +187,11 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • `/yt <search term>` - Search YouTube for videos
 • `/cmd` - Show this command list
 • `/mg_count` - Show message statistics
+
+**Filter Commands (Groups Only):**
+• `/filter <keyword>` - Save filter (reply to a message)
+• `/del <keyword>` - Delete a filter
+• `/filters` - List all filters in group
 
 **Features:**
 • Forward messages to groups via private chat
@@ -243,6 +315,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.from_user.id in muted_users:
         await message.delete()
         return
+
+    # Check for filter matches first (only in groups)
+    if message.chat.type in ['group', 'supergroup']:
+        filter_matched = await check_filters(update, context)
+        # Continue with other processing even if filter matched
 
     # Count message (only for non-command messages)
     if not (message.text and message.text.startswith('/')):
@@ -1052,7 +1129,7 @@ async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Make API request to Nager.Date API
         url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/{country_code}"
-        
+
         response = requests.get(url, timeout=10)
 
         if response.status_code == 404:
@@ -1089,7 +1166,7 @@ async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'NL': '🇳🇱', 'BE': '🇧🇪', 'CH': '🇨🇭', 'AT': '🇦🇹', 'SE': '🇸🇪',
             'NO': '🇳🇴', 'DK': '🇩🇰', 'FI': '🇫🇮', 'PT': '🇵🇹', 'GR': '🇬🇷'
         }
-        
+
         country_flag = country_flags.get(country_code, '🏳️')
 
         # Format response
@@ -1102,10 +1179,10 @@ async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date = holiday['date']
             local_name = holiday.get('localName', holiday['name'])
             name = holiday['name']
-            
+
             # Use local name if different from English name, otherwise just use name
             holiday_name = local_name if local_name != name else name
-            
+
             holidays_text += f"📅 **{date}** - {holiday_name}\n"
 
         # Split message if too long (Telegram limit is 4096 characters)
@@ -1115,9 +1192,9 @@ async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_newline = first_part.rfind('\n')
             if last_newline > 0:
                 first_part = first_part[:last_newline]
-            
+
             await message.reply_text(first_part, parse_mode='Markdown')
-            
+
             # Send remaining part
             remaining = holidays_text[len(first_part):]
             await message.reply_text(remaining, parse_mode='Markdown')
@@ -1270,20 +1347,20 @@ async def send_image_results_to_chat(bot, chat_id, search_query, page=1):
         for i, image in enumerate(data['hits'], 1):
             image_url = image.get('webformatURL', image.get('largeImageURL', ''))
             tags = image.get('tags', 'No tags available')
-            
+
             # Limit tags length
             if len(tags) > 50:
                 tags = tags[:47] + "..."
-            
+
             images_text += f"{i}. [View Image]({image_url})\n   **Tags:** {tags}\n\n"
 
         # Create pagination keyboard
         keyboard = []
         if page < 10 and len(data['hits']) == 5:  # Only show More/Next if we have more results and haven't reached limit
             keyboard.append([InlineKeyboardButton("More ➡️", callback_data=f"img_next_{search_query}_{page + 1}")])
-        
+
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        
+
         await bot.send_message(chat_id, images_text, parse_mode='Markdown', disable_web_page_preview=False, reply_markup=reply_markup)
 
     except requests.exceptions.Timeout:
@@ -1388,7 +1465,7 @@ async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get statistics
         view_count = video_details['statistics'].get('viewCount', 'N/A')
         like_count = video_details['statistics'].get('likeCount', 'N/A')
-        
+
         # Format numbers
         if view_count != 'N/A':
             view_count = f"{int(view_count):,}"
@@ -1488,6 +1565,169 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error in wiki command: {e}")
         await message.reply_text("❌ An error occurred while fetching Wikipedia data.")
 
+# Define the /filter command
+async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Filters can only be used in groups.")
+        return
+
+    # Check if keyword is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/filter <keyword>\n\nReply to a message with this command to save it as a filter.")
+        return
+
+    # Check if it's a reply to a message
+    if not message.reply_to_message:
+        await message.reply_text("❗ Please reply to a message to save it as a filter.")
+        return
+
+    keyword = ' '.join(context.args)
+    reply_msg = message.reply_to_message
+    
+    # Determine reply type and content
+    reply_type = None
+    reply_content = None
+    
+    if reply_msg.text:
+        reply_type = "text"
+        reply_content = reply_msg.text
+    elif reply_msg.photo:
+        reply_type = "photo"
+        reply_content = reply_msg.photo[-1].file_id
+    elif reply_msg.sticker:
+        reply_type = "sticker"
+        reply_content = reply_msg.sticker.file_id
+    elif reply_msg.voice:
+        reply_type = "voice"
+        reply_content = reply_msg.voice.file_id
+    elif reply_msg.video:
+        reply_type = "video"
+        reply_content = reply_msg.video.file_id
+    elif reply_msg.animation:
+        reply_type = "animation"
+        reply_content = reply_msg.animation.file_id
+    elif reply_msg.document:
+        reply_type = "document"
+        reply_content = reply_msg.document.file_id
+    else:
+        await message.reply_text("❌ Unsupported message type for filters.")
+        return
+    
+    # Save filter to MongoDB
+    success = await save_filter(message.chat.id, keyword, reply_type, reply_content)
+    
+    if success:
+        await message.reply_text(f"✅ Filter saved! Messages containing '{keyword}' will trigger this response.")
+    else:
+        await message.reply_text("❌ Failed to save filter. Please try again.")
+
+# Define the /del command
+async def del_filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Filters can only be managed in groups.")
+        return
+
+    # Check if keyword is provided
+    if not context.args:
+        await message.reply_text("❗ Please use the command like this:\n/del <keyword>")
+        return
+
+    keyword = ' '.join(context.args)
+    
+    # Delete filter from MongoDB
+    success = await delete_filter(message.chat.id, keyword)
+    
+    if success:
+        await message.reply_text(f"✅ Filter '{keyword}' has been deleted.")
+    else:
+        await message.reply_text(f"❌ Filter '{keyword}' not found.")
+
+# Define the /filters command
+async def filters_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Filters can only be viewed in groups.")
+        return
+
+    # Get all filters for this chat
+    chat_filters = await get_filters(message.chat.id)
+    
+    if not chat_filters:
+        await message.reply_text("📝 No filters have been set for this group.")
+        return
+    
+    # Format filter list using HTML parsing for better reliability
+    filters_text = f"📝 <b>Filters in {message.chat.title}:</b>\n\n"
+    
+    for filter_doc in chat_filters:
+        keyword = filter_doc['keyword']
+        reply_type = filter_doc['reply_type']
+        # Escape HTML special characters
+        escaped_keyword = keyword.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        filters_text += f"• <code>{escaped_keyword}</code> → {reply_type}\n"
+    
+    await message.reply_text(filters_text, parse_mode='HTML')
+
+# Check for filter matches in messages
+async def check_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message or not message.text:
+        return False
+    
+    # Only check in groups
+    if message.chat.type == 'private':
+        return False
+    
+    # Skip if message is a command
+    if message.text.startswith('/'):
+        return False
+    
+    # Check for filter matches
+    message_text = message.text.lower()
+    chat_filters = await get_filters(message.chat.id)
+    
+    for filter_doc in chat_filters:
+        keyword = filter_doc['keyword']
+        if keyword in message_text:
+            reply_type = filter_doc['reply_type']
+            reply_content = filter_doc['reply_content']
+            
+            try:
+                if reply_type == "text":
+                    await message.reply_text(reply_content)
+                elif reply_type == "photo":
+                    await message.reply_photo(photo=reply_content)
+                elif reply_type == "sticker":
+                    await message.reply_sticker(sticker=reply_content)
+                elif reply_type == "voice":
+                    await message.reply_voice(voice=reply_content)
+                elif reply_type == "video":
+                    await message.reply_video(video=reply_content)
+                elif reply_type == "animation":
+                    await message.reply_animation(animation=reply_content)
+                elif reply_type == "document":
+                    await message.reply_document(document=reply_content)
+                
+                return True  # Filter matched and replied
+            except Exception as e:
+                print(f"Error sending filter reply: {e}")
+    
+    return False  # No filter matched
+
 async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
@@ -1532,13 +1772,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = query.data.split("_", 3)  # Split into max 4 parts: img_next_query_page
         search_query = parts[2]
         page = int(parts[3])
-        
+
         # Store chat_id before deleting the message
         chat_id = query.message.chat_id
-        
+
         # Delete the current message
         await query.message.delete()
-        
+
         # Send next page results to the chat
         await send_image_results_to_chat(context.bot, chat_id, search_query, page)
         return
@@ -1694,6 +1934,9 @@ app.add_handler(CommandHandler("holidays", holidays_command))
 app.add_handler(CommandHandler("movie", movie_command))
 app.add_handler(CommandHandler("img", img_command))
 app.add_handler(CommandHandler("yt", yt_command))
+app.add_handler(CommandHandler("filter", filter_command))
+app.add_handler(CommandHandler("del", del_filter_command))
+app.add_handler(CommandHandler("filters", filters_list_command))
 
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute$'), mute_command))
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute_list$'), mute_list_command))
