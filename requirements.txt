@@ -11,6 +11,3 @@ pydub
 langdetect
 motor
 motor
-yt-dlp
-flask
-pytelegrambotapi
