@@ -1,7 +1,5 @@
-
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import MessageHandler, filters
+from telegram.ext import MessageHandler, filters, PollAnswerHandler
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from keep_alive import keep_alive
 import os
@@ -11,6 +9,9 @@ import random
 import io
 import requests
 import asyncio
+import psutil
+import gc
+import time
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # Start the Replit web server to keep the bot alive
@@ -29,6 +30,17 @@ if not MONGO_URI:
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client.telegram_bot
 filters_collection = db.filters
+
+# MongoDB Quiz connection
+MONGO_QUIZ_URI = os.environ.get('MONGO_QUIZ_URI')
+if MONGO_QUIZ_URI:
+    quiz_mongo_client = AsyncIOMotorClient(MONGO_QUIZ_URI)
+    quiz_db = quiz_mongo_client.quiz_bot
+    quiz_collection = quiz_db.questions
+else:
+    quiz_mongo_client = None
+    quiz_db = None
+    quiz_collection = None
 
 # Filter management functions
 async def save_filter(chat_id, keyword, reply_type, reply_content):
@@ -130,9 +142,13 @@ message_counts = {
     'monthly': {}
 }
 
-# Store active quiz sessions - removed quiz functionality
+# Store active quiz sessions
+active_quizzes = {}
+quiz_user_states = {}
+quiz_settings = {}
 
 import datetime
+import time
 
 def get_date_keys():
     now = datetime.datetime.now()
@@ -157,6 +173,67 @@ def increment_message_count():
     message_counts['weekly'][week] += 1
     message_counts['monthly'][month] += 1
 
+# Define the /status command
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    try:
+        # Get CPU information
+        cpu_percent = psutil.cpu_percent(interval=1)
+        cpu_count = psutil.cpu_count()
+
+        # Get memory information
+        memory = psutil.virtual_memory()
+        memory_total_mb = round(memory.total / (1024 * 1024))
+        memory_used_mb = round(memory.used / (1024 * 1024))
+        memory_available_mb = round(memory.available / (1024 * 1024))
+        memory_percent = memory.percent
+
+        # Get disk information
+        disk = psutil.disk_usage('/')
+        disk_total_gb = round(disk.total / (1024 * 1024 * 1024), 1)
+        disk_used_gb = round(disk.used / (1024 * 1024 * 1024), 1)
+        disk_free_gb = round(disk.free / (1024 * 1024 * 1024), 1)
+        disk_percent = round((disk.used / disk.total) * 100, 1)
+
+        # Get system uptime
+        boot_time = psutil.boot_time()
+        uptime_seconds = time.time() - boot_time
+        uptime_hours = round(uptime_seconds / 3600, 1)
+
+        # Format the status message
+        status_text = f"""
+🖥️ **System Status**
+
+**CPU:**
+• Usage: {cpu_percent}%
+• Cores: {cpu_count}
+
+**Memory:**
+• Used: {memory_used_mb} MB ({memory_percent}%)
+• Available: {memory_available_mb} MB
+• Total: {memory_total_mb} MB
+
+**Storage:**
+• Used: {disk_used_gb} GB ({disk_percent}%)
+• Free: {disk_free_gb} GB
+• Total: {disk_total_gb} GB
+
+**System:**
+• Uptime: {uptime_hours} hours
+
+🟢 Bot is running smoothly!
+        """
+
+        await message.reply_text(status_text.strip(), parse_mode='Markdown')
+
+    except Exception as e:
+        error_text = f"❌ **Error getting system status:**\n\n`{str(e)}`"
+        await message.reply_text(error_text, parse_mode='Markdown')
+        print(f"Error in status command: {e}")
+
 # Define the /cmd command
 async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -164,45 +241,153 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     commands_text = """
-🤖 **Bot Commands List** 🤖
+╔═══════════════════════════════╗
+║         🌟 **WELCOME!** 🌟         ║
+╚═══════════════════════════════╝
 
-**Admin Commands:**
-• `.mute` - Mute a user (reply to their message)
-• `.mute_list` - Show muted users list
-• `.delete` - Delete a message (reply to it)
-• `.delete_all` - Delete all messages from a user
+🌟 **Hello and Welcome!** 🌟
+I'm so happy you're here! 💖 This little bot was lovingly created with my small knowledge, and a big thanks to the amazing **Celestial Family** ✨ for the inspiration.
 
-**General Commands:**
-• `/go <text>` - Send message as bot
-• `/voice <text>` - Convert text to voice (Sinhala)
-• `/stick <text>` - Create text sticker
-• `/hello <text>` - Create fancy hello sticker
-• `/more <count> <text>` - Repeat message multiple times
-• `/weather <city>` - Get current weather for a city
-• `/weather_c <city>` - Get 5-day weather forecast for a city
-• `/ask <query>` - Get instant answers from DuckDuckGo
-• `/wiki <topic>` - Get Wikipedia summary for a topic
-• `/holidays <country_code> <year>` - Get public holidays for a country
-• `/movie <movie title>` - Get movie/series information
-• `/img <search query>` - Search for images from Pixabay
-• `/yt <search term>` - Search YouTube for videos
-• `/cmd` - Show this command list
-• `/mg_count` - Show message statistics
+🚀 **Built using Replit & Render** to make your experience smooth and fun!
 
-**Filter Commands (Groups Only):**
-• `/filter <keyword>` - Save filter (reply to a message)
-• `/del <keyword>` - Delete a filter
-• `/filters` - List all filters in group
+🙏 Please use this bot kindly and responsibly — let's keep things friendly and bright! 🌈
+Enjoy and have a wonderful day! 🌸😊
 
-**Features:**
-• Forward messages to groups via private chat
-• Reply to group messages via private chat
-• Auto-delete muted user messages
+╔═══════════════════════════════╗
+║       🤖 **BOT COMMANDS**       ║
+╚═══════════════════════════════╝
 
-Made with ❤️ for group management!
+🛡️ **Admin Commands:**
+┣━ `.mute` - Mute a user (reply to their message)
+┣━ `.mute_list` - Show muted users list  
+┗━ `.delete` - Delete a message (reply to it)
+
+💬 **General Commands:**
+┣━ `/go <text>` - Send message as bot
+┣━ `/voice <text>` - Convert text to voice (Sinhala)
+┣━ `/stick <text>` - Create text sticker
+┣━ `/more <count> <text>` - Repeat message multiple times
+┣━ `/weather <city>` - Get current weather for a city
+┣━ `/weather_c <city>` - Get 5-day weather forecast
+┣━ `/wiki <topic>` - Get Wikipedia summary for a topic
+┣━ `/img <search query>` - Search for images from Pixabay
+┣━ `/ai <prompt>` - Get AI response from Together AI
+┣━ `/status` - Show system status and resource usage
+┣━ `/refresh` - Clean memory and optimize bot performance
+┣━ `/info` - Show group information and admin list *(Groups Only)*
+┣━ `/cmd` - Show this command list
+┗━ `/mg_count` - Show message statistics
+
+🔧 **Filter Commands** *(Groups Only)*:
+┣━ `/filter <keyword>` - Save filter (reply to a message)
+┣━ `/del <keyword>` - Delete a filter
+┗━ `/filters` - List all filters in group
+
+🎯 **Quiz Commands:**
+┣━ `/quiz` - Start a quiz in group chat *(Groups Only)*
+┣━ `/set_quiz` - Add quiz questions *(Private Chat Only)*
+┗━ `/stop_quiz` - Stop current quiz and show results *(Groups Only)*
+
+✨ **Special Features:**
+┣━ 📤 Forward messages to groups via private chat
+┣━ 💬 Reply to group messages via private chat
+┗━ 🔇 Auto-delete muted user messages
+
+╔═══════════════════════════════╗
+║   Made with ❤️ by Celestial Family   ║
+║       🌟 Enjoy & Have Fun! 🌟       ║
+╚═══════════════════════════════╝
     """
 
     await message.reply_text(commands_text, parse_mode='Markdown')
+
+# Define the /refresh command
+async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    message = update.message
+    if not message:
+        return
+
+    # Check if user is authorized (only admin can refresh)
+    if str(message.from_user.id) != "8197285353":
+        await message.reply_text("❌ You are not authorized to use this command.")
+        return
+
+    try:
+        # Get current memory usage before cleanup
+        memory_before = psutil.virtual_memory()
+        used_before_mb = round(memory_before.used / (1024 * 1024))
+
+        # Create confirmation keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm Refresh", callback_data="refresh_confirm"),
+                InlineKeyboardButton("❌ Cancel", callback_data="refresh_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        refresh_text = f"""
+🔄 **System Refresh Requested**
+
+📊 **Current Memory Usage:** {used_before_mb} MB
+⚠️ **Warning:** This will clean up bot memory and temporary data.
+
+**What will be cleaned:**
+• 🗑️ Garbage collection
+• 📝 Pending messages cache
+• 🎯 Quiz user states
+• 🔧 Temporary variables
+
+**Are you sure you want to proceed?**
+        """
+
+        await message.reply_text(refresh_text.strip(), reply_markup=reply_markup, parse_mode='Markdown')
+
+    except Exception as e:
+        print(f"Error in refresh command: {e}")
+        await message.reply_text("❌ An error occurred while preparing refresh.")
+
+async def perform_memory_cleanup():
+    """Perform actual memory cleanup operations"""
+    import gc
+    global pending_messages, quiz_user_states, quiz_settings, message_counts
+    
+    try:
+        # Clear pending messages
+        pending_messages.clear()
+        
+        # Clear quiz states
+        quiz_user_states.clear()
+        quiz_settings.clear()
+        
+        # Keep only recent message counts (last 7 days for daily, current month for others)
+        today, week, month = get_date_keys()
+        current_date = datetime.datetime.now()
+        
+        # Clean old daily counts (keep last 7 days)
+        keys_to_remove = []
+        for date_key in list(message_counts['daily'].keys()):
+            try:
+                date_obj = datetime.datetime.strptime(date_key, '%Y-%m-%d')
+                if (current_date - date_obj).days > 7:
+                    keys_to_remove.append(date_key)
+            except:
+                keys_to_remove.append(date_key)
+        
+        for key in keys_to_remove:
+            del message_counts['daily'][key]
+        
+        # Force garbage collection multiple times
+        collected = 0
+        for _ in range(3):
+            collected += gc.collect()
+        
+        return collected
+        
+    except Exception as e:
+        print(f"Error during memory cleanup: {e}")
+        return 0
 
 # Define the /mg_count command
 async def mg_count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -227,6 +412,159 @@ async def mg_count_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
 
     await message.reply_text(count_text, parse_mode='Markdown')
+
+# Define the /info command
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ This command can only be used in groups.")
+        return
+
+    try:
+        chat = message.chat
+        chat_id = chat.id
+        
+        # Get chat information
+        chat_info = await context.bot.get_chat(chat_id)
+        
+        # Basic group info
+        group_name = chat_info.title or "Unknown Group"
+        group_type = "Supergroup" if chat.type == 'supergroup' else "Group"
+        member_count = await context.bot.get_chat_member_count(chat_id)
+        
+        # Get group description
+        description = chat_info.description or "No description available"
+        if len(description) > 200:
+            description = description[:197] + "..."
+        
+        # Get administrators
+        try:
+            administrators = await context.bot.get_chat_administrators(chat_id)
+            
+            owner = None
+            admins = []
+            
+            for admin in administrators:
+                user = admin.user
+                if admin.status == 'creator':
+                    owner = user
+                elif admin.status == 'administrator':
+                    admins.append({
+                        'user': user,
+                        'can_delete_messages': admin.can_delete_messages,
+                        'can_restrict_members': admin.can_restrict_members,
+                        'can_promote_members': admin.can_promote_members,
+                        'can_change_info': admin.can_change_info,
+                        'can_invite_users': admin.can_invite_users,
+                        'can_pin_messages': admin.can_pin_messages,
+                        'can_manage_video_chats': getattr(admin, 'can_manage_video_chats', False)
+                    })
+        except Exception as e:
+            print(f"Error getting administrators: {e}")
+            administrators = []
+            owner = None
+            admins = []
+        
+        # Format admin list
+        admin_text = ""
+        
+        if owner:
+            owner_name = owner.first_name
+            if owner.last_name:
+                owner_name += f" {owner.last_name}"
+            if owner.username:
+                owner_name += f" (@{owner.username})"
+            admin_text += f"👑 **Owner:** [{owner_name}](tg://user?id={owner.id})\n\n"
+        
+        if admins:
+            admin_text += "🛡️ **Administrators:**\n"
+            for i, admin_info in enumerate(admins, 1):
+                admin_user = admin_info['user']
+                admin_name = admin_user.first_name
+                if admin_user.last_name:
+                    admin_name += f" {admin_user.last_name}"
+                if admin_user.username:
+                    admin_name += f" (@{admin_user.username})"
+                
+                # Show key permissions
+                permissions = []
+                if admin_info['can_delete_messages']:
+                    permissions.append("🗑️")
+                if admin_info['can_restrict_members']:
+                    permissions.append("🔇")
+                if admin_info['can_promote_members']:
+                    permissions.append("⬆️")
+                if admin_info['can_change_info']:
+                    permissions.append("✏️")
+                if admin_info['can_invite_users']:
+                    permissions.append("👥")
+                if admin_info['can_pin_messages']:
+                    permissions.append("📌")
+                if admin_info['can_manage_video_chats']:
+                    permissions.append("📹")
+                
+                permission_text = " ".join(permissions) if permissions else "Basic"
+                admin_text += f"{i}. [{admin_name}](tg://user?id={admin_user.id}) - {permission_text}\n"
+        
+        if not admin_text:
+            admin_text = "❌ Could not retrieve administrator information"
+        
+        # Create modernized info text with better styling
+        info_text = f"""
+╔═══════════════════════════════╗
+║       📋 **GROUP INFO**        ║
+╚═══════════════════════════════╝
+
+🏷️ **Group Details:**
+┣━ **Name:** {group_name}
+┣━ **Type:** {group_type}
+┗━ **Members:** {member_count}
+
+📝 **Description:**
+{description}
+
+╔═══════════════════════════════╗
+║      👑 **ADMINISTRATION**     ║
+╚═══════════════════════════════╝
+
+{admin_text}
+
+╔═══════════════════════════════╗
+║    🔑 **PERMISSION LEGEND**    ║
+╚═══════════════════════════════╝
+
+🗑️ Delete Messages  |  🔇 Restrict Members
+⬆️ Promote Members  |  ✏️ Change Info  
+👥 Invite Users     |  📌 Pin Messages
+📹 Manage Video Chats
+
+╔═══════════════════════════════╗
+║   🌟 Powered by Celestial Bot   ║
+╚═══════════════════════════════╝
+        """
+        
+        # Create delete button
+        keyboard = [[InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_info_{message.message_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send info message without photo
+        info_msg = await message.reply_text(
+            info_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+        
+        # Delete the command message
+        await message.delete()
+        
+    except Exception as e:
+        print(f"Error in info command: {e}")
+        await message.reply_text("❌ An error occurred while fetching group information.")
 
 # Define the mute command
 async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,10 +603,27 @@ async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Error in mute command: {e}")
 
+# Handle /start command for quiz setup redirection
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message or message.chat.type != 'private':
+        return
+
+    # Check if started with set_quiz parameter
+    if context.args and context.args[0] == 'set_quiz':
+        await set_quiz_command(update, context)
+    else:
+        await message.reply_text("👋 Hello! Use /cmd to see available commands.")
+
 # Handle all messages to delete muted users' messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
+        return
+
+    # Handle quiz setup messages in private chat
+    if message.chat.type == 'private' and message.from_user.id in quiz_user_states:
+        await handle_quiz_setup_message(update, context)
         return
 
     # Check for admin commands FIRST before any other processing
@@ -277,9 +632,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await delete_command(update, context)
             return
 
-        if message.text == '.delete_all':
-            await delete_all_command(update, context)
-            return
+
 
         if message.text == '.mute_list':
             await mute_list_command(update, context)
@@ -338,18 +691,87 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
 
             # Store message ID for future reference
-            reply_msg = await context.bot.send_message(
-                chat_id=8197285353,
-                text=f"Reply from {user_mention} in group:\n\nOriginal message: {message.reply_to_message.text}\n\nID:{message.message_id}",
-                parse_mode='HTML'
-            )
+            reply_msg = message.reply_to_message
+            reply_msg_id = reply_msg.message_id
 
-            # Forward the actual reply
-            await context.bot.forward_message(
-                chat_id=8197285353,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id
-            )
+            # Send the reply based on message type
+            if message.text:
+                await context.bot.send_message(
+                    chat_id=8197285353,
+                    text=message.text,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.photo:
+                await context.bot.send_photo(
+                    chat_id=8197285353,
+                    photo=message.photo[-1].file_id,
+                    caption=message.caption,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.video:
+                await context.bot.send_video(
+                    chat_id=8197285353,
+                    video=message.video.file_id,
+                    caption=message.caption,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.animation:
+                await context.bot.send_animation(
+                    chat_id=8197285353,
+                    animation=message.animation.file_id,
+                    caption=message.caption,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.sticker:
+                await context.bot.send_sticker(
+                    chat_id=8197285353,
+                    sticker=message.sticker.file_id,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.voice:
+                await context.bot.send_voice(
+                    chat_id=8197285353,
+                    voice=message.voice.file_id,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.audio:
+                await context.bot.send_audio(
+                    chat_id=8197285353,
+                    audio=message.audio.file_id,
+                    caption=message.caption,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.document:
+                await context.bot.send_document(
+                    chat_id=8197285353,
+                    document=message.document.file_id,
+                    caption=message.caption,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.video_note:
+                await context.bot.send_video_note(
+                    chat_id=8197285353,
+                    video_note=message.video_note.file_id,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            elif message.poll:
+                poll = message.poll
+                await context.bot.send_poll(
+                    chat_id=8197285353,
+                    question=poll.question,
+                    options=[option.text for option in poll.options],
+                    is_anonymous=poll.is_anonymous,
+                    type=poll.type,
+                    allows_multiple_answers=poll.allows_multiple_answers,
+                    reply_to_message_id=reply_msg.message_id
+                )
+            else:
+                # Fallback to forwarding if type not handled
+                await context.bot.forward_message(
+                    chat_id=8197285353,
+                    from_chat_id=message.chat_id,
+                    message_id=message.message_id
+                )
         return
 
     # Handle private chat messages
@@ -384,10 +806,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Store message for group selection
         message_id = message.message_id
+        message_type = 'unsupported'
+        content = None
+        caption = None
+
+        if message.text:
+            message_type = 'text'
+            content = message.text
+        elif message.photo:
+            message_type = 'photo'
+            content = message.photo[-1].file_id
+            caption = message.caption
+        elif message.sticker:
+            message_type = 'sticker'
+            content = message.sticker.file_id
+        elif message.video:
+            message_type = 'video'
+            content = message.video.file_id
+            caption = message.caption
+        elif message.animation:
+            message_type = 'animation'
+            content = message.animation.file_id
+            caption = message.caption
+        elif message.voice:
+            message_type = 'voice'
+            content = message.voice.file_id
+        elif message.audio:
+            message_type = 'audio'
+            content = message.audio.file_id
+            caption = message.caption
+        elif message.document:
+            message_type = 'document'
+            content = message.document.file_id
+            caption = message.caption
+        elif message.video_note:
+            message_type = 'video_note'
+            content = message.video_note.file_id
+        elif message.poll:
+            message_type = 'poll'
+            content = {
+                'question': message.poll.question,
+                'options': [option.text for option in message.poll.options],
+                'is_anonymous': message.poll.is_anonymous,
+                'type': message.poll.type,
+                'allows_multiple_answers': message.poll.allows_multiple_answers
+            }
+
         pending_messages[message_id] = {
-            'type': 'text' if message.text else 'sticker' if message.sticker else 'photo' if message.photo else 'unsupported',
-            'content': message.text if message.text else message.sticker.file_id if message.sticker else message.photo[-1].file_id if message.photo else None,
-            'caption': message.caption if message.photo else None
+            'type': message_type,
+            'content': content,
+            'caption': caption
         }
 
         # Check if message type is supported
@@ -672,109 +1140,7 @@ async def stick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_to_message_id=reply_msg_id  # This will be None for normal messages
     )
 
-# Define the /hello command
-async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
 
-    # Get the text content after /hello
-    text = ' '.join(context.args)
-    if not text:
-        text = "hello"  # Default text if none provided
-
-    # Delete the command message
-    await message.delete()
-
-    # Create image
-    width, height = 512, 512
-    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    # Create cloud shape background with gradient
-    # Night sky gradient
-    for y in range(height):
-        for x in range(width):
-            distance = ((x - width/2)**2 + (y - height/2)**2)**0.5
-            ratio = min(1.0, distance / (width/2))
-            r = int(30 * (1 - ratio))  # Dark blue
-            g = int(20 * (1 - ratio))
-            b = int(60 * (1 - ratio))
-            if distance < width/2:  # Cloud shape mask
-                img.putpixel((x, y), (r, g, b, 255))
-
-    # Add stars and moon
-    for _ in range(30):
-        star_x = random.randint(0, width)
-        star_y = random.randint(0, height)
-        star_size = random.randint(2, 4)
-        draw.ellipse([star_x, star_y, star_x + star_size, star_y + star_size], fill=(255, 255, 200, 255))
-
-    # Add heart
-    heart_color = (255, 182, 193, 255)  # Light pink
-    heart_size = 80
-    heart_x = width//2 - heart_size//2
-    heart_y = height//2 - heart_size
-    draw.ellipse([heart_x, heart_y, heart_x + heart_size//2, heart_y + heart_size//2], fill=heart_color)
-    draw.ellipse([heart_x + heart_size//2, heart_y, heart_x + heart_size, heart_y + heart_size//2], fill=heart_color)
-    draw.polygon([
-        (heart_x, heart_y + heart_size//4),
-        (heart_x + heart_size//2, heart_y + heart_size),
-        (heart_x + heart_size, heart_y + heart_size//4)
-    ], fill=heart_color)
-
-    # Use consistent font size
-    try:
-        font_size = 80  # Fixed size that's readable but not too large
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-
-        # Calculate text size and scale down only if too wide
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        if text_width > width * 0.8:  # If text is wider than 80% of image
-            font_size = int(font_size * (width * 0.8) / text_width)
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
-    except:
-        font = ImageFont.load_default()
-
-    # Get text size
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    x = (width - text_width) / 2
-    y = (height - text_height) / 2 + 20  # Slightly lower than center
-
-    # Add multiple outline layers for glow effect
-    outline_colors = [
-        (255, 255, 255, 50),  # White glow
-        (255, 192, 203, 100),  # Pink glow
-        (255, 255, 255, 150),  # Brighter white
-        (0, 0, 0, 255),       # Black outline
-    ]
-
-    for color in outline_colors:
-        for offset in range(3, 8, 2):
-            for dx, dy in [(j, i) for i in range(-offset, offset+1) for j in range(-offset, offset+1)]:
-                draw.text((x + dx, y + dy), text, font=font, fill=color)
-
-    # Main text in pink
-    draw.text((x, y), text, font=font, fill=(255, 192, 203, 255))
-
-    # Convert to webp with transparency
-    img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='WEBP')
-    img_byte_arr.seek(0)
-
-    # Get reply message ID if it's a reply
-    reply_to = message.reply_to_message
-    reply_msg_id = reply_to.message_id if reply_to else None
-
-    # Send as sticker, replying to original message if it exists
-    await context.bot.send_sticker(
-        chat_id=message.chat_id,
-        sticker=img_byte_arr,
-        reply_to_message_id=reply_msg_id
-    )
 
 # Define the /more command
 async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1035,258 +1401,11 @@ async def weather_forecast_command(update: Update, context: ContextTypes.DEFAULT
         print(f"Error in weather forecast command: {e}")
         await message.reply_text("❌ An error occurred while fetching forecast data.")
 
-# Define the /ask command for DuckDuckGo instant answers
-async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
 
-    # Check if query is provided
-    if not context.args:
-        await message.reply_text("❗ Please use the command like this:\n/ask <your question>")
-        return
 
-    query = ' '.join(context.args)
 
-    try:
-        # Make API request to DuckDuckGo Instant Answer API
-        url = "https://api.duckduckgo.com/"
-        params = {
-            'q': query,
-            'format': 'json',
-            'no_redirect': '1',
-            'skip_disambig': '1'
-        }
 
-        response = requests.get(url, params=params, timeout=10)
 
-        if response.status_code != 200:
-            await message.reply_text("❌ Unable to fetch answer from DuckDuckGo.")
-            return
-
-        data = response.json()
-
-        # Extract answer from response
-        answer_text = ""
-        answer_url = ""
-
-        # First try AbstractText
-        if data.get('AbstractText'):
-            answer_text = data['AbstractText']
-            answer_url = data.get('AbstractURL', '')
-
-        # Fallback to first RelatedTopic if AbstractText is empty
-        elif data.get('RelatedTopics') and len(data['RelatedTopics']) > 0:
-            first_topic = data['RelatedTopics'][0]
-            if isinstance(first_topic, dict) and first_topic.get('Text'):
-                answer_text = first_topic['Text']
-                answer_url = first_topic.get('FirstURL', '')
-
-        # If no meaningful answer found
-        if not answer_text:
-            await message.reply_text("Sorry, I couldn't find an instant answer for that.")
-            return
-
-        # Format response
-        response_text = f"🔍 **Answer for: {query}**\n\n{answer_text}"
-
-        # Add URL if available
-        if answer_url:
-            response_text += f"\n\n🔗 [More info]({answer_url})"
-
-        await message.reply_text(response_text, parse_mode='Markdown', disable_web_page_preview=True)
-
-    except requests.exceptions.Timeout:
-        await message.reply_text("❌ DuckDuckGo is taking too long to respond.")
-    except requests.exceptions.RequestException:
-        await message.reply_text("❌ Unable to connect to DuckDuckGo service.")
-    except Exception as e:
-        print(f"Error in ask command: {e}")
-        await message.reply_text("❌ An error occurred while fetching the answer.")
-
-# Define the /holidays command for public holidays
-async def holidays_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
-
-    # Check if country code and year are provided
-    if len(context.args) < 2:
-        await message.reply_text("❗ Please use the command like this:\n/holidays [country_code] [year]\n\nExample: /holidays US 2025")
-        return
-
-    country_code = context.args[0].upper()
-    try:
-        year = int(context.args[1])
-    except ValueError:
-        await message.reply_text("❗ Please provide a valid year.\nExample: /holidays US 2025")
-        return
-
-    # Validate year range
-    if year < 1900 or year > 2100:
-        await message.reply_text("❗ Please provide a year between 1900 and 2100.")
-        return
-
-    try:
-        # Make API request to Nager.Date API
-        url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/{country_code}"
-
-        response = requests.get(url, timeout=10)
-
-        if response.status_code == 404:
-            # Suggest common country code alternatives
-            suggestions = {
-                'UK': 'GB', 'LK': 'LK', 'USA': 'US', 'INDIA': 'IN', 
-                'ENGLAND': 'GB', 'BRITAIN': 'GB', 'SRILANKA': 'LK'
-            }
-            suggestion = suggestions.get(country_code, None)
-            error_msg = f"❌ Country code '{country_code}' not found or no holidays available for {year}."
-            if suggestion and suggestion != country_code:
-                error_msg += f"\n💡 Try using '{suggestion}' instead of '{country_code}'"
-            error_msg += "\n\nCommon codes: US, GB, DE, IN, CA, AU, FR, IT, ES, JP"
-            await message.reply_text(error_msg)
-            return
-        elif response.status_code != 200:
-            await message.reply_text("❌ Unable to fetch holiday data. Please try again later.")
-            return
-
-        data = response.json()
-
-        if not data:
-            await message.reply_text(f"❌ No public holidays found for {country_code} in {year}.")
-            return
-
-        # Get country flag emoji (basic mapping for common countries)
-        country_flags = {
-            'US': '🇺🇸', 'DE': '🇩🇪', 'IN': '🇮🇳', 'GB': '🇬🇧', 'FR': '🇫🇷', 
-            'IT': '🇮🇹', 'ES': '🇪🇸', 'CA': '🇨🇦', 'AU': '🇦🇺', 'JP': '🇯🇵',
-            'KR': '🇰🇷', 'CN': '🇨🇳', 'BR': '🇧🇷', 'MX': '🇲🇽', 'RU': '🇷🇺',
-            'ZA': '🇿🇦', 'EG': '🇪🇬', 'TR': '🇹🇷', 'SA': '🇸🇦', 'AE': '🇦🇪',
-            'SG': '🇸🇬', 'TH': '🇹🇭', 'MY': '🇲🇾', 'ID': '🇮🇩', 'PH': '🇵🇭',
-            'VN': '🇻🇳', 'LK': '🇱🇰', 'BD': '🇧🇩', 'PK': '🇵🇰', 'NP': '🇳🇵',
-            'NL': '🇳🇱', 'BE': '🇧🇪', 'CH': '🇨🇭', 'AT': '🇦🇹', 'SE': '🇸🇪',
-            'NO': '🇳🇴', 'DK': '🇩🇰', 'FI': '🇫🇮', 'PT': '🇵🇹', 'GR': '🇬🇷'
-        }
-
-        country_flag = country_flags.get(country_code, '🏳️')
-
-        # Format response
-        holidays_text = f"{country_flag} **Public Holidays in {country_code} for {year}:**\n\n"
-
-        # Sort holidays by date
-        sorted_holidays = sorted(data, key=lambda x: x['date'])
-
-        for holiday in sorted_holidays:
-            date = holiday['date']
-            local_name = holiday.get('localName', holiday['name'])
-            name = holiday['name']
-
-            # Use local name if different from English name, otherwise just use name
-            holiday_name = local_name if local_name != name else name
-
-            holidays_text += f"📅 **{date}** - {holiday_name}\n"
-
-        # Split message if too long (Telegram limit is 4096 characters)
-        if len(holidays_text) > 4000:
-            # Send first part
-            first_part = holidays_text[:3900]
-            last_newline = first_part.rfind('\n')
-            if last_newline > 0:
-                first_part = first_part[:last_newline]
-
-            await message.reply_text(first_part, parse_mode='Markdown')
-
-            # Send remaining part
-            remaining = holidays_text[len(first_part):]
-            await message.reply_text(remaining, parse_mode='Markdown')
-        else:
-            await message.reply_text(holidays_text, parse_mode='Markdown')
-
-    except requests.exceptions.Timeout:
-        await message.reply_text("❌ Holiday service is taking too long to respond. Please try again.")
-    except requests.exceptions.RequestException:
-        await message.reply_text("❌ Unable to connect to holiday service. Please try again later.")
-    except Exception as e:
-        print(f"Error in holidays command: {e}")
-        await message.reply_text("❌ An error occurred while fetching holiday data.")
-
-# Define the /movie command for movie information
-async def movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
-
-    # Check if movie title is provided
-    if not context.args:
-        await message.reply_text("ℹ️ Usage: `/movie [movie title]`")
-        return
-
-    movie_title = ' '.join(context.args)
-
-    try:
-        # Get API key from environment
-        api_key = os.environ.get('MOVIE_API_KEY')
-        if not api_key:
-            await message.reply_text("❌ Movie service is not configured.")
-            return
-
-        # Format movie title for URL (replace spaces with +)
-        formatted_title = movie_title.replace(' ', '+')
-
-        # Make API request to OMDb API
-        url = f"http://www.omdbapi.com/"
-        params = {
-            'apikey': api_key,
-            't': formatted_title
-        }
-
-        response = requests.get(url, params=params, timeout=10)
-
-        if response.status_code != 200:
-            await message.reply_text("❌ Unable to fetch movie data. Please try again later.")
-            return
-
-        data = response.json()
-
-        # Check if movie was found
-        if data.get('Response') == 'False':
-            await message.reply_text(f'❌ No results found for "{movie_title}"')
-            return
-
-        # Extract movie information
-        title = data.get('Title', 'N/A')
-        year = data.get('Year', 'N/A')
-        imdb_rating = data.get('imdbRating', 'N/A')
-        genre = data.get('Genre', 'N/A')
-        plot = data.get('Plot', 'N/A')
-        director = data.get('Director', 'N/A')
-        actors = data.get('Actors', 'N/A')
-        language = data.get('Language', 'N/A')
-        poster_url = data.get('Poster', '')
-
-        # Format response
-        movie_text = f"""🎬 **Title:** {title}
-📆 **Year:** {year}
-⭐ **IMDb Rating:** {imdb_rating}
-🎭 **Genre:** {genre}
-🎞️ **Plot:** {plot}
-🎬 **Director:** {director}
-👥 **Actors:** {actors}
-🌐 **Language:** {language}"""
-
-        # Add poster if available and not "N/A"
-        if poster_url and poster_url != "N/A":
-            movie_text += f"\n🖼️ [Poster]({poster_url})"
-
-        await message.reply_text(movie_text, parse_mode='Markdown', disable_web_page_preview=True)
-
-    except requests.exceptions.Timeout:
-        await message.reply_text("❌ Movie service is taking too long to respond. Please try again.")
-    except requests.exceptions.RequestException:
-        await message.reply_text("❌ Unable to connect to movie service. Please try again later.")
-    except Exception as e:
-        print(f"Error in movie command: {e}")
-        await message.reply_text("❌ An error occurred while fetching movie data.")
 
 # Define the /img command for image search
 async def img_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1372,138 +1491,590 @@ async def send_image_results_to_chat(bot, chat_id, search_query, page=1):
         print(f"Error in img command: {e}")
         await bot.send_message(chat_id, "❌ An error occurred while searching for images.")
 
-# Define the /yt command for YouTube search
-async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+# Define the /ai command for Together AI
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
 
-    # Check if search term is provided
+    # Check if prompt is provided
     if not context.args:
-        await message.reply_text("ℹ️ Usage: `/yt [search term]`\n\nExample: `/yt python tutorial`")
+        await message.reply_text("❗ Please use the command like this:\n/ai <your prompt>")
         return
 
-    search_term = ' '.join(context.args)
+    prompt = ' '.join(context.args)
 
     try:
         # Get API key from environment
-        api_key = os.environ.get('YT_API_KEY')
+        api_key = os.environ.get('TOGETHER_API_KEY')
         if not api_key:
-            await message.reply_text("❌ YouTube API service is not configured.")
+            await message.reply_text("❌ AI service is not configured.")
             return
 
-        # Step 1: Search for videos
-        search_url = "https://www.googleapis.com/youtube/v3/search"
-        search_params = {
-            'part': 'snippet',
-            'q': search_term,
-            'type': 'video',
-            'maxResults': 1,
-            'order': 'relevance',
-            'key': api_key
+        # Send "typing" action to show bot is processing
+        await context.bot.send_chat_action(chat_id=message.chat_id, action='typing')
+
+        # Make API request to Together AI
+        url = "https://api.together.xyz/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
         }
 
-        search_response = requests.get(search_url, params=search_params, timeout=10)
-
-        if search_response.status_code != 200:
-            await message.reply_text("❌ Unable to search YouTube. Please try again later.")
-            return
-
-        search_data = search_response.json()
-
-        if not search_data.get('items'):
-            await message.reply_text(f"❌ No videos found for '{search_term}'")
-            return
-
-        video_item = search_data['items'][0]
-        video_id = video_item['id']['videoId']
-        channel_id = video_item['snippet']['channelId']
-
-        # Step 2: Get video statistics and details
-        video_url = "https://www.googleapis.com/youtube/v3/videos"
-        video_params = {
-            'part': 'statistics,snippet',
-            'id': video_id,
-            'key': api_key
+        data = {
+            "model": "Qwen/Qwen2.5-7B-Instruct-Turbo",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "top_p": 0.9
         }
 
-        video_response = requests.get(video_url, params=video_params, timeout=10)
+        response = requests.post(url, json=data, headers=headers, timeout=30)
 
-        if video_response.status_code != 200:
-            await message.reply_text("❌ Unable to fetch video details.")
+        if response.status_code == 401:
+            await message.reply_text("❌ AI service authentication failed.")
+            return
+        elif response.status_code == 429:
+            await message.reply_text("❌ AI service rate limit exceeded. Please try again later.")
+            return
+        elif response.status_code != 200:
+            await message.reply_text(f"❌ AI service error (Status: {response.status_code}). Please try again later.")
             return
 
-        video_data = video_response.json()
+        response_data = response.json()
 
-        if not video_data.get('items'):
-            await message.reply_text("❌ Video details not found.")
+        # Extract AI response
+        if 'choices' not in response_data or not response_data['choices']:
+            await message.reply_text("❌ No response from AI service.")
             return
 
-        video_details = video_data['items'][0]
+        ai_response = response_data['choices'][0]['message']['content'].strip()
 
-        # Step 3: Get channel subscriber count
-        channel_url = "https://www.googleapis.com/youtube/v3/channels"
-        channel_params = {
-            'part': 'statistics',
-            'id': channel_id,
-            'key': api_key
-        }
-
-        channel_response = requests.get(channel_url, params=channel_params, timeout=10)
-
-        if channel_response.status_code != 200:
-            await message.reply_text("❌ Unable to fetch channel details.")
+        if not ai_response:
+            await message.reply_text("❌ Empty response from AI service.")
             return
 
-        channel_data = channel_response.json()
+        # Format response with user's prompt
+        response_text = f"🤖 **AI Response:**\n\n{ai_response}"
 
-        # Extract information
-        title = video_details['snippet']['title']
-        channel_name = video_details['snippet']['channelTitle']
-        thumbnail_url = video_details['snippet']['thumbnails'].get('high', {}).get('url', '')
-        video_url_link = f"https://www.youtube.com/watch?v={video_id}"
+        # Add prompt reference if response is long
+        if len(ai_response) > 100:
+            response_text = f"🤖 **AI Response to:** \"{prompt[:50]}{'...' if len(prompt) > 50 else ''}\"\n\n{ai_response}"
 
-        # Get statistics
-        view_count = video_details['statistics'].get('viewCount', 'N/A')
-        like_count = video_details['statistics'].get('likeCount', 'N/A')
-
-        # Format numbers
-        if view_count != 'N/A':
-            view_count = f"{int(view_count):,}"
-        if like_count != 'N/A':
-            like_count = f"{int(like_count):,}"
-
-        # Get subscriber count
-        subscriber_count = 'N/A'
-        if channel_data.get('items'):
-            subscriber_count = channel_data['items'][0]['statistics'].get('subscriberCount', 'N/A')
-            if subscriber_count != 'N/A':
-                subscriber_count = f"{int(subscriber_count):,}"
-
-        # Format response
-        youtube_text = f"""🎥 **YouTube Search Results for "{search_term}":**
-
-📺 **Title:** {title}
-🎬 **Channel:** {channel_name}
-👁️ **Views:** {view_count}
-❤️ **Likes:** {like_count}
-👤 **Subscribers:** {subscriber_count}
-
-🔗 [Watch Video]({video_url_link})"""
-
-        # Add thumbnail if available
-        if thumbnail_url:
-            youtube_text += f"\n📷 [Thumbnail]({thumbnail_url})"
-
-        await message.reply_text(youtube_text, parse_mode='Markdown', disable_web_page_preview=False)
+        await message.reply_text(response_text, parse_mode='Markdown')
 
     except requests.exceptions.Timeout:
-        await message.reply_text("❌ YouTube API is taking too long to respond. Please try again.")
-    except requests.exceptions.RequestException:
-        await message.reply_text("❌ Unable to connect to YouTube API. Please try again later.")
+        await message.reply_text("❌ AI service is taking too long to respond. Please try again.")
+    except requests.exceptions.RequestException as e:
+        print(f"AI API request error: {e}")
+        await message.reply_text("❌ Unable to connect to AI service. Please try again later.")
+    except KeyError as e:
+        print(f"AI API response parsing error: {e}")
+        await message.reply_text("❌ Unexpected response format from AI service.")
     except Exception as e:
-        print(f"Error in yt command: {e}")
-        await message.reply_text("❌ An error occurred while searching YouTube.")
+        print(f"Error in ai command: {e}")
+        await message.reply_text("❌ An error occurred while processing your request.")
+
+# Quiz command for group chats
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Quiz can only be started in groups.")
+        return
+
+    # Check if quiz database is configured
+    if quiz_collection is None:
+        await message.reply_text("❌ Quiz service is not configured.")
+        return
+
+    chat_id = message.chat.id
+
+    # Check if quiz is already running
+    if chat_id in active_quizzes:
+        await message.reply_text("❌ A quiz is already running in this group!")
+        return
+
+    try:
+        # Check for unused questions
+        unused_questions = await quiz_collection.find({"used": False}).to_list(length=None)
+
+        if not unused_questions:
+            # No unused questions available
+            bot_username = context.bot.username
+            quiz_link = f"https://t.me/{bot_username}?start=set_quiz"
+
+            keyboard = [[InlineKeyboardButton("📝 ADD QUESTIONS", url=quiz_link)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await message.reply_text(
+                "❌ My database doesn't have unused questions. Please add questions before using this feature.",
+                reply_markup=reply_markup
+            )
+            return
+
+        # Ask for number of questions first
+        keyboard = [
+            [InlineKeyboardButton("5️⃣", callback_data=f"quiz_select_5_{chat_id}")],
+            [InlineKeyboardButton("🔟", callback_data=f"quiz_select_10_{chat_id}")],
+            [InlineKeyboardButton("1️⃣5️⃣", callback_data=f"quiz_select_15_{chat_id}")],
+            [InlineKeyboardButton("2️⃣0️⃣", callback_data=f"quiz_select_20_{chat_id}")],
+            [InlineKeyboardButton("2️⃣5️⃣", callback_data=f"quiz_select_25_{chat_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text(
+            f"🎯 **Quiz Setup**\n\n📊 Available unused questions: {len(unused_questions)}\n\n🔢 How many questions do you want for this quiz?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+        # Store available questions temporarily
+        quiz_settings[f"available_{chat_id}"] = unused_questions
+
+    except Exception as e:
+        print(f"Error in quiz command: {e}")
+        await message.reply_text("❌ An error occurred while starting the quiz.")
+
+# Stop quiz command for group chats
+async def stop_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Stop quiz can only be used in groups.")
+        return
+
+    chat_id = message.chat.id
+
+    # Check if quiz is running
+    if chat_id not in active_quizzes:
+        await message.reply_text("❌ No quiz is currently running in this group.")
+        return
+
+    try:
+        # Show confirmation dialog before stopping quiz
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Stop Quiz", callback_data=f"quiz_stop_confirm_{chat_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"quiz_stop_cancel_{chat_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text(
+            "🛑 **Are you sure you want to stop the quiz?**\n\nThis will end the current quiz and show final results.",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        print(f"Error in stop_quiz command: {e}")
+        await message.reply_text("❌ An error occurred while stopping the quiz.")
+
+async def start_quiz_countdown(bot, chat_id):
+    """Start quiz with countdown"""
+    try:
+        quiz_session = active_quizzes[chat_id]
+        total_questions = quiz_session['total_questions']
+
+        countdown_text = f"🎯 **QUIZ STARTING!**\n\n📊 Total Questions: {total_questions}\n⏱️ Time per question: {quiz_session['question_time']} seconds\n\n🕐 Starting in:"
+
+        countdown_msg = await bot.send_message(
+            chat_id=chat_id,
+            text=countdown_text + " 3️⃣",
+            parse_mode='Markdown'
+        )
+
+        quiz_session['countdown_message'] = countdown_msg
+
+        # Countdown 3, 2, 1
+        for i in [2, 1]:
+            await asyncio.sleep(1)
+            await countdown_msg.edit_text(countdown_text + f" {i}️⃣", parse_mode='Markdown')
+
+        await asyncio.sleep(1)
+        await countdown_msg.edit_text("🚀 **QUIZ STARTED!**", parse_mode='Markdown')
+
+        # Start first question
+        await send_quiz_poll(bot, chat_id, quiz_session['questions'][0])
+
+    except Exception as e:
+        print(f"Error in quiz countdown: {e}")
+
+async def send_quiz_poll(bot, chat_id, question):
+    """Send a quiz question using Telegram poll"""
+    try:
+        question_text = None
+        for key, value in question.items():
+            if key.startswith('question'):
+                question_text = value
+                break
+
+        if not question_text:
+            await bot.send_message(chat_id, "❌ Invalid question format.")
+            return
+
+        options = question.get('options', [])
+        if len(options) != 4:
+            await bot.send_message(chat_id, "❌ Question must have exactly 4 options.")
+            return
+
+        # Find correct answer index
+        correct_answer = question.get('correct')
+        correct_index = 0
+        for i, option in enumerate(options):
+            if option == correct_answer:
+                correct_index = i
+                break
+
+        quiz_session = active_quizzes[chat_id]
+        current_q = quiz_session['current_index'] + 1
+        total_q = quiz_session['total_questions']
+
+        # Send poll
+        poll = await bot.send_poll(
+            chat_id=chat_id,
+            question=f"❓ Question {current_q}/{total_q}: {question_text}",
+            options=options,
+            type='quiz',
+            correct_option_id=correct_index,
+            open_period=quiz_session['question_time'],
+            is_anonymous=False,
+            explanation=f"✅ Correct answer: {correct_answer}"
+        )
+
+        quiz_session['poll_id'] = poll.poll.id
+        quiz_session['current_poll'] = poll
+
+        # Mark question as used
+        await quiz_collection.update_one(
+            {"_id": question['_id']},
+            {"$set": {"used": True}}
+        )
+
+        # Schedule next question or end quiz using asyncio instead of job_queue
+        asyncio.create_task(schedule_next_question(bot, chat_id, quiz_session['question_time']))
+
+    except Exception as e:
+        print(f"Error sending quiz poll: {e}")
+
+async def schedule_next_question(bot, chat_id, delay_seconds):
+    """Schedule the next question after a delay"""
+    try:
+        await asyncio.sleep(delay_seconds + 3)  # Add 3 seconds buffer
+
+        if chat_id not in active_quizzes:
+            return
+
+        quiz_session = active_quizzes[chat_id]
+        quiz_session['current_index'] += 1
+
+        if quiz_session['current_index'] < len(quiz_session['questions']):
+            # Send next question
+            next_question = quiz_session['questions'][quiz_session['current_index']]
+            await send_quiz_poll(bot, chat_id, next_question)
+        else:
+            # Quiz finished
+            await show_quiz_final_results(bot, chat_id)
+            del active_quizzes[chat_id]
+
+    except Exception as e:
+        print(f"Error scheduling next question: {e}")
+
+
+
+async def show_quiz_final_results(bot, chat_id):
+    """Show final quiz results"""
+    try:
+        quiz_session = active_quizzes.get(chat_id)
+        if not quiz_session:
+            return
+
+        total_questions = quiz_session['total_questions']
+
+        # Simple completion message without any leaderboard or scores
+        results_text = f"🏁 **Quiz Finished!**\n\n📊 Total Questions: {total_questions}\n🎉 Thanks for participating!"
+
+        await bot.send_message(chat_id, results_text, parse_mode='Markdown')
+
+    except Exception as e:
+        print(f"Error showing quiz results: {e}")
+        await bot.send_message(chat_id, "❌ Error displaying results.")
+
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle poll answers from users"""
+    try:
+        poll_answer = update.poll_answer
+        user_id = poll_answer.user.id
+        poll_id = poll_answer.poll_id
+        selected_options = poll_answer.option_ids
+
+        print(f"Poll answer received: user_id={user_id}, poll_id={poll_id}, options={selected_options}")
+
+        # Find which quiz this poll belongs to
+        quiz_chat_id = None
+        for chat_id, quiz_session in active_quizzes.items():
+            if quiz_session.get('poll_id') == poll_id:
+                quiz_chat_id = chat_id
+                break
+
+        if quiz_chat_id is None:
+            print(f"Poll not found in active quizzes: {poll_id}")
+            return  # Poll not found in active quizzes
+
+        quiz_session = active_quizzes[quiz_chat_id]
+
+        # Initialize participants dict if not exists
+        if 'participants' not in quiz_session:
+            quiz_session['participants'] = {}
+
+        # Initialize scores dict if not exists
+        if 'scores' not in quiz_session:
+            quiz_session['scores'] = {}
+
+        # Get user info
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.first_name
+        except:
+            username = f"User {user_id}"
+
+        # Store user info for leaderboard
+        quiz_session['participants'][user_id] = username
+
+        # Initialize user score if not exists
+        if user_id not in quiz_session['scores']:
+            quiz_session['scores'][user_id] = 0
+
+        print(f"Updated quiz session - Participants: {len(quiz_session['participants'])}, User {username} tracked")
+
+        # Check if answer is correct (for quiz polls, Telegram automatically marks correct answers)
+        # Since this is a quiz poll, we can check if the user answered correctly
+        if selected_options:  # User answered
+            current_question = quiz_session['questions'][quiz_session['current_index']]
+            correct_answer = current_question.get('correct')
+
+            if len(selected_options) > 0 and len(current_question['options']) > selected_options[0]:
+                user_answer = current_question['options'][selected_options[0]]
+
+                if user_answer == correct_answer:
+                    quiz_session['scores'][user_id] += 1
+                    print(f"User {username} answered correctly! Score: {quiz_session['scores'][user_id]}")
+                else:
+                    print(f"User {username} answered incorrectly. Correct: {correct_answer}, User: {user_answer}")
+
+        print(f"Current quiz state: participants={len(quiz_session['participants'])}, scores={quiz_session['scores']}")
+
+    except Exception as e:
+        print(f"Error handling poll answer: {e}")
+
+# Save setup command to exit quiz setup mode
+async def save_setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in private chats
+    if message.chat.type != 'private':
+        await message.reply_text("❌ This command can only be used in private chat.")
+        return
+
+    user_id = message.from_user.id
+
+    # Check if user is in quiz setup mode
+    if user_id not in quiz_user_states:
+        await message.reply_text("❌ You are not currently in question adding mode.")
+        return
+
+    # Get current progress
+    state = quiz_user_states[user_id]
+    current_num = state.get('current_question_num', 1)
+    total_num = state.get('total_questions', 0)
+
+    # Clean up user state
+    del quiz_user_states[user_id]
+    if user_id in quiz_settings:
+        del quiz_settings[user_id]
+
+    # Send confirmation message
+    if current_num > 1:
+        questions_added = current_num - 1
+        await message.reply_text(
+            f"✅ **Setup saved!**\n\n📝 Questions added: {questions_added}/{total_num}\n\n🔄 You are now back to normal private chat mode.\nYou can forward messages to groups again."
+        )
+    else:
+        await message.reply_text(
+            "✅ **Setup exited!**\n\n🔄 You are now back to normal private chat mode.\nYou can forward messages to groups again."
+        )
+
+# Set quiz command for private chats
+async def set_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in private chats
+    if message.chat.type != 'private':
+        await message.reply_text("❌ Quiz setup can only be done in private chat.")
+        return
+
+    # Check if quiz database is configured
+    if quiz_collection is None:
+        await message.reply_text("❌ Quiz service is not configured.")
+        return
+
+    user_id = message.from_user.id
+
+    # Initialize user state
+    quiz_user_states[user_id] = {'step': 'count_selection'}
+
+    # Ask for question count directly (skip time selection for now)
+    keyboard = [
+        [InlineKeyboardButton("🔢 10", callback_data="quiz_count_10")],
+        [InlineKeyboardButton("🔢 15", callback_data="quiz_count_15")],
+        [InlineKeyboardButton("🔢 20", callback_data="quiz_count_20")],
+        [InlineKeyboardButton("🔢 25", callback_data="quiz_count_25")],
+        [InlineKeyboardButton("🔢 30", callback_data="quiz_count_30")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await message.reply_text(
+        "🔢 How many questions do you want to add?",
+        reply_markup=reply_markup
+    )
+
+async def handle_quiz_setup_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle messages during quiz setup"""
+    message = update.message
+    if not message or message.chat.type != 'private':
+        return
+
+    user_id = message.from_user.id
+    if user_id not in quiz_user_states:
+        return
+
+    state = quiz_user_states[user_id]
+    step = state.get('step')
+
+    try:
+        if step == 'question_text':
+            state['current_question'] = {'text': message.text}
+            state['step'] = 'option_1'
+            await message.reply_text("📝 Enter option 1:")
+
+        elif step == 'option_1':
+            state['current_question']['options'] = [message.text]
+            state['step'] = 'option_2'
+            await message.reply_text("📝 Enter option 2:")
+
+        elif step == 'option_2':
+            state['current_question']['options'].append(message.text)
+            state['step'] = 'option_3'
+            await message.reply_text("📝 Enter option 3:")
+
+        elif step == 'option_3':
+            state['current_question']['options'].append(message.text)
+            state['step'] = 'option_4'
+            await message.reply_text("📝 Enter option 4:")
+
+        elif step == 'option_4':
+            state['current_question']['options'].append(message.text)
+            state['step'] = 'correct_answer'
+
+            # Show options for correct answer selection
+            options = state['current_question']['options']
+            keyboard = []
+            for i, option in enumerate(options):
+                keyboard.append([InlineKeyboardButton(f"{i+1}. {option}", callback_data=f"quiz_correct_{i}")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await message.reply_text(
+                "✅ Which one is the correct answer?",
+                reply_markup=reply_markup
+            )
+
+    except Exception as e:
+        print(f"Error in quiz setup: {e}")
+        await message.reply_text("❌ An error occurred. Please try again.")
+
+async def save_quiz_question(user_id, question_data):
+    """Save a quiz question to MongoDB"""
+    try:
+        # Get the next question number
+        last_question = await quiz_collection.find().sort("_id", -1).limit(1).to_list(length=1)
+        question_num = 1
+
+        if last_question:
+            for key in last_question[0].keys():
+                if key.startswith('question') and key[8:].isdigit():
+                    question_num = max(question_num, int(key[8:]) + 1)
+
+        # Create the question document
+        question_doc = {
+            f"question{question_num}": question_data['text'],
+            "options": question_data['options'],
+            "correct": question_data['correct'],
+            "used": False,
+            "created_by": user_id,
+            "created_at": datetime.datetime.utcnow()
+        }
+
+        await quiz_collection.insert_one(question_doc)
+        return True
+
+    except Exception as e:
+        print(f"Error saving quiz question: {e}")
+        return False
+
+async def show_quiz_results(bot, chat_id, scores):
+    """Show final quiz results"""
+    try:
+        if not scores:
+            await bot.send_message(chat_id, "🏁 **Quiz Finished!**\n\nNo one participated in the quiz.")
+            return
+
+        # Sort scores in descending order
+        sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+        results_text = "🏁 **Quiz Finished! Final Results:**\n\n"
+
+        for i, (user_id, score) in enumerate(sorted_scores, 1):
+            try:
+                user = await bot.get_chat(user_id)
+                user_name = user.first_name
+
+                if i == 1:
+                    emoji = "🥇"
+                elif i == 2:
+                    emoji = "🥈"
+                elif i == 3:
+                    emoji = "🥉"
+                else:
+                    emoji = f"{i}."
+
+                results_text += f"{emoji} <a href='tg://user?id={user_id}'>{user_name}</a>: {score} points\n"
+            except:
+                results_text += f"{i}. User {user_id}: {score} points\n"
+
+        results_text += "\n🎉 Congratulations to all participants!"
+
+        await bot.send_message(chat_id, results_text, parse_mode='HTML')
+
+    except Exception as e:
+        print(f"Error showing quiz results: {e}")
+        await bot.send_message(chat_id, "❌ Error displaying results.")
 
 # Define the /wiki command for Wikipedia summaries
 async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1589,11 +2160,11 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyword = ' '.join(context.args)
     reply_msg = message.reply_to_message
-    
+
     # Determine reply type and content
     reply_type = None
     reply_content = None
-    
+
     if reply_msg.text:
         reply_type = "text"
         reply_content = reply_msg.text
@@ -1618,10 +2189,10 @@ async def filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await message.reply_text("❌ Unsupported message type for filters.")
         return
-    
+
     # Save filter to MongoDB
     success = await save_filter(message.chat.id, keyword, reply_type, reply_content)
-    
+
     if success:
         await message.reply_text(f"✅ Filter saved! Messages containing '{keyword}' will trigger this response.")
     else:
@@ -1644,10 +2215,10 @@ async def del_filter_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     keyword = ' '.join(context.args)
-    
+
     # Delete filter from MongoDB
     success = await delete_filter(message.chat.id, keyword)
-    
+
     if success:
         await message.reply_text(f"✅ Filter '{keyword}' has been deleted.")
     else:
@@ -1666,21 +2237,21 @@ async def filters_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Get all filters for this chat
     chat_filters = await get_filters(message.chat.id)
-    
+
     if not chat_filters:
         await message.reply_text("📝 No filters have been set for this group.")
         return
-    
+
     # Format filter list using HTML parsing for better reliability
     filters_text = f"📝 <b>Filters in {message.chat.title}:</b>\n\n"
-    
+
     for filter_doc in chat_filters:
         keyword = filter_doc['keyword']
         reply_type = filter_doc['reply_type']
         # Escape HTML special characters
         escaped_keyword = keyword.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
         filters_text += f"• <code>{escaped_keyword}</code> → {reply_type}\n"
-    
+
     await message.reply_text(filters_text, parse_mode='HTML')
 
 # Check for filter matches in messages
@@ -1688,25 +2259,25 @@ async def check_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not message.text:
         return False
-    
+
     # Only check in groups
     if message.chat.type == 'private':
         return False
-    
+
     # Skip if message is a command
     if message.text.startswith('/'):
         return False
-    
+
     # Check for filter matches
     message_text = message.text.lower()
     chat_filters = await get_filters(message.chat.id)
-    
+
     for filter_doc in chat_filters:
         keyword = filter_doc['keyword']
         if keyword in message_text:
             reply_type = filter_doc['reply_type']
             reply_content = filter_doc['reply_content']
-            
+
             try:
                 if reply_type == "text":
                     await message.reply_text(reply_content)
@@ -1722,11 +2293,11 @@ async def check_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await message.reply_animation(animation=reply_content)
                 elif reply_type == "document":
                     await message.reply_document(document=reply_content)
-                
+
                 return True  # Filter matched and replied
             except Exception as e:
                 print(f"Error sending filter reply: {e}")
-    
+
     return False  # No filter matched
 
 async def mute_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1768,8 +2339,317 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+
+
+    # Handle question count selection for quiz
+    if query.data.startswith("quiz_select_"):
+        parts = query.data.split("_")
+        requested_count = int(parts[2])
+        chat_id = int(parts[3])
+
+        available_key = f"available_{chat_id}"
+        if available_key not in quiz_settings:
+            await query.edit_message_text("❌ Quiz session expired. Please try starting again.")
+            return
+
+        unused_questions = quiz_settings[available_key]
+        available_count = len(unused_questions)
+
+        if available_count < requested_count:
+            # Not enough questions available
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Use Available", callback_data=f"quiz_use_available_{chat_id}_{available_count}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"quiz_cancel_{chat_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                f"⚠️ **Not Enough Questions**\n\n❌ My database doesn't have {requested_count} unused questions.\n📊 My database has only {available_count} unused questions.\n\n🔄 I will provide only my unused questions ({available_count} questions).\n\nDo you want to continue with {available_count} questions?",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            # Enough questions available
+            selected_questions = unused_questions[:requested_count]
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Start Quiz", callback_data=f"quiz_start_confirm_{chat_id}_{requested_count}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"quiz_cancel_{chat_id}")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                f"🎯 **Quiz Ready!**\n\n📊 Questions: {requested_count}\n⏱️ Time per question: 30 seconds\n\n⚠️ **Are you sure you want to start the quiz?**",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
+            # Store quiz data temporarily
+            quiz_settings[f"temp_{chat_id}"] = {
+                'questions': selected_questions,
+                'current_index': 0,
+                'scores': {},
+                'total_questions': requested_count,
+                'question_time': 30,
+                'poll_id': None,
+                'countdown_message': None
+            }
+
+    # Handle using available questions when not enough
+    elif query.data.startswith("quiz_use_available_"):
+        parts = query.data.split("_")
+        chat_id = int(parts[3])
+        available_count = int(parts[4])
+
+        available_key = f"available_{chat_id}"
+        if available_key not in quiz_settings:
+            await query.edit_message_text("❌ Quiz session expired. Please try starting again.")
+            return
+
+        unused_questions = quiz_settings[available_key]
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Start Quiz", callback_data=f"quiz_start_confirm_{chat_id}_{available_count}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"quiz_cancel_{chat_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"🎯 **Quiz Ready!**\n\n📊 Questions: {available_count}\n⏱️ Time per question: 30 seconds\n\n⚠️ **Are you sure you want to start the quiz?**",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+        # Store quiz data temporarily
+        quiz_settings[f"temp_{chat_id}"] = {
+            'questions': unused_questions,
+            'current_index': 0,
+            'scores': {},
+            'total_questions': available_count,
+            'question_time': 30,
+            'poll_id': None,
+            'countdown_message': None
+        }
+
+    # Handle quiz start confirmation
+    elif query.data.startswith("quiz_start_confirm_"):
+        parts = query.data.split("_")
+        chat_id = int(parts[3])
+        question_count = int(parts[4]) if len(parts) > 4 else 0
+
+        temp_key = f"temp_{chat_id}"
+        available_key = f"available_{chat_id}"
+
+        if temp_key not in quiz_settings:
+            await query.edit_message_text("❌ Quiz session expired. Please try starting again.")
+            return
+
+        # Move temporary quiz data to active quizzes
+        active_quizzes[chat_id] = quiz_settings[temp_key]
+        del quiz_settings[temp_key]
+
+        # Clean up available questions
+        if available_key in quiz_settings:
+            del quiz_settings[available_key]
+
+        await query.edit_message_text("🎯 **Quiz Starting!**", parse_mode='Markdown')
+
+        # Start quiz countdown
+        await start_quiz_countdown(context.bot, chat_id)
+
+    # Handle quiz cancellation
+    elif query.data.startswith("quiz_cancel_"):
+        chat_id = int(query.data.split("_")[2])
+        temp_key = f"temp_{chat_id}"
+        available_key = f"available_{chat_id}"
+
+        # Clean up temporary data
+        if temp_key in quiz_settings:
+            del quiz_settings[temp_key]
+        if available_key in quiz_settings:
+            del quiz_settings[available_key]
+
+        await query.edit_message_text("❌ Quiz cancelled.")
+
+    # Handle quiz stop confirmation
+    elif query.data.startswith("quiz_stop_confirm_"):
+        chat_id = int(query.data.split("_")[3])
+
+        if chat_id not in active_quizzes:
+            await query.edit_message_text("❌ No quiz is currently running.")
+            return
+
+        try:
+            # Get quiz session
+            quiz_session = active_quizzes[chat_id]
+
+            # Stop the current poll if it exists
+            if 'current_poll' in quiz_session and quiz_session['current_poll']:
+                try:
+                    await context.bot.stop_poll(
+                        chat_id=chat_id,
+                        message_id=quiz_session['current_poll'].message_id
+                    )
+                except Exception as e:
+                    print(f"Error stopping poll: {e}")
+
+            # Edit the confirmation message
+            await query.edit_message_text("🛑 **Quiz stopped by admin!**", parse_mode='Markdown')
+
+            # Show final results
+            await show_quiz_final_results(context.bot, chat_id)
+
+            # Clean up quiz session
+            del active_quizzes[chat_id]
+
+        except Exception as e:
+            print(f"Error stopping quiz: {e}")
+            await query.edit_message_text("❌ An error occurred while stopping the quiz.")
+
+    # Handle quiz stop cancellation
+    elif query.data.startswith("quiz_stop_cancel_"):
+        await query.edit_message_text("✅ Quiz continues running.")
+
+    # Handle refresh confirmation
+    elif query.data == "refresh_confirm":
+        # Check authorization again
+        if str(query.from_user.id) != "8197285353":
+            await query.answer("❌ You are not authorized to use this command.")
+            return
+
+        try:
+            # Start refresh animation
+            animation_frames = [
+                "🔄 **Initializing refresh...**",
+                "🧹 **Cleaning memory cache...**",
+                "🗑️ **Running garbage collection...**",
+                "📊 **Optimizing performance...**",
+                "⚡ **Finalizing cleanup...**"
+            ]
+
+            # Show animation frames
+            for i, frame in enumerate(animation_frames):
+                await query.edit_message_text(frame, parse_mode='Markdown')
+                if i < len(animation_frames) - 1:  # Don't sleep after last frame
+                    await asyncio.sleep(1)
+
+            # Perform actual cleanup
+            collected_objects = await perform_memory_cleanup()
+
+            # Get memory usage after cleanup
+            memory_after = psutil.virtual_memory()
+            used_after_mb = round(memory_after.used / (1024 * 1024))
+            available_mb = round(memory_after.available / (1024 * 1024))
+
+            # Final success message
+            success_text = f"""
+✅ **Refresh Completed Successfully!**
+
+📊 **Memory Status:**
+• Used: {used_after_mb} MB
+• Available: {available_mb} MB
+• Objects collected: {collected_objects}
+
+🧹 **Cleaned up:**
+• ✅ Pending messages cache
+• ✅ Quiz user states  
+• ✅ Temporary data
+• ✅ Old message counts
+
+🚀 **Bot performance optimized!**
+            """
+
+            await query.edit_message_text(success_text.strip(), parse_mode='Markdown')
+
+        except Exception as e:
+            print(f"Error during refresh: {e}")
+            await query.edit_message_text("❌ **Refresh failed!** An error occurred during cleanup.")
+
+    # Handle refresh cancellation
+    elif query.data == "refresh_cancel":
+        await query.edit_message_text("❌ **Refresh cancelled.** No changes were made.")
+
+    # Handle info message deletion
+    elif query.data.startswith("delete_info_"):
+        try:
+            # Delete the info message
+            await query.message.delete()
+        except Exception as e:
+            print(f"Error deleting info message: {e}")
+            await query.answer("❌ Failed to delete message.")
+
+    # Handle quiz count selection
+    elif query.data.startswith("quiz_count_"):
+        user_id = query.from_user.id
+        question_count = int(query.data.split("_")[2])
+
+        if user_id not in quiz_user_states:
+            await query.edit_message_text("❌ Session expired. Please start again with /set_quiz")
+            return
+
+        quiz_settings[user_id] = {'question_count': question_count}
+        quiz_user_states[user_id].update({
+            'step': 'question_text',
+            'current_question_num': 1,
+            'total_questions': question_count
+        })
+
+        await query.edit_message_text(
+            f"✅ Will add {question_count} questions.\n\n📝 **Question 1/{question_count}**\nEnter the question text:\n\n💡 **Tip:** Send /save_setup anytime to exit question adding mode and return to normal chat."
+        )
+
+    # Handle correct answer selection
+    elif query.data.startswith("quiz_correct_"):
+        user_id = query.from_user.id
+        correct_index = int(query.data.split("_")[2])
+
+        if user_id not in quiz_user_states:
+            await query.edit_message_text("❌ Session expired.")
+            return
+
+        state = quiz_user_states[user_id]
+        if 'current_question' not in state:
+            await query.edit_message_text("❌ No question data found.")
+            return
+
+        # Set correct answer
+        state['current_question']['correct'] = state['current_question']['options'][correct_index]
+
+        # Save question to database
+        success = await save_quiz_question(user_id, state['current_question'])
+
+        if success:
+            current_num = state['current_question_num']
+            total_num = state['total_questions']
+
+            if current_num < total_num:
+                # Move to next question
+                state['current_question_num'] += 1
+                state['step'] = 'question_text'
+                await query.edit_message_text(
+                    f"✅ Question {current_num} saved!\n\n📝 **Question {current_num + 1}/{total_num}**\nEnter the question text:\n\n💡 **Tip:** Send /save_setup anytime to exit question adding mode."
+                )
+            else:
+                # All questions completed
+                await query.edit_message_text(
+                    f"🎉 **All {total_num} questions saved successfully!**\n\nYou can now use /quiz in group chats to start a quiz."
+                )
+                del quiz_user_states[user_id]
+                if user_id in quiz_settings:
+                    del quiz_settings[user_id]
+        else:
+            await query.edit_message_text("❌ Failed to save question. Please try again.")
+
+
+
     # Handle image pagination
-    if query.data.startswith("img_next_"):
+    elif query.data.startswith("img_next_"):
         parts = query.data.split("_", 3)  # Split into max 4 parts: img_next_query_page
         search_query = parts[2]
         page = int(parts[3])
@@ -1807,16 +2687,60 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=group_info["id"],
                     text=message_data['content']
                 )
-            elif message_data['type'] == 'sticker':
-                await context.bot.send_sticker(
-                    chat_id=group_info["id"],
-                    sticker=message_data['content']
-                )
             elif message_data['type'] == 'photo':
                 await context.bot.send_photo(
                     chat_id=group_info["id"],
                     photo=message_data['content'],
                     caption=message_data['caption']
+                )
+            elif message_data['type'] == 'sticker':
+                await context.bot.send_sticker(
+                    chat_id=group_info["id"],
+                    sticker=message_data['content']
+                )
+            elif message_data['type'] == 'video':
+                await context.bot.send_video(
+                    chat_id=group_info["id"],
+                    video=message_data['content'],
+                    caption=message_data['caption']
+                )
+            elif message_data['type'] == 'animation':
+                await context.bot.send_animation(
+                    chat_id=group_info["id"],
+                    animation=message_data['content'],
+                    caption=message_data['caption']
+                )
+            elif message_data['type'] == 'voice':
+                await context.bot.send_voice(
+                    chat_id=group_info["id"],
+                    voice=message_data['content']
+                )
+            elif message_data['type'] == 'audio':
+                await context.bot.send_audio(
+                    chat_id=group_info["id"],
+                    audio=message_data['content'],
+                    caption=message_data['caption']
+                )
+            elif message_data['type'] == 'document':
+                await context.bot.send_document(
+                    chat_id=group_info["id"],
+                    document=message_data['content'],
+                    caption=message_data['caption']
+                )
+            elif message_data['type'] == 'video_note':
+                await context.bot.send_video_note(
+                    chat_id=group_info["id"],
+                    video_note=message_data['content']
+                )
+            elif message_data['type'] == 'poll':
+                poll_data = message_data['content']
+                await context.bot.send_poll(
+                    chat_id=group_info["id"],
+                    question=poll_data['question'],
+                    options=poll_data['options'],
+                    is_anonymous=poll_data['is_anonymous'],
+                    type=poll_data['type'],
+                    allows_multiple_answers=poll_data['allows_multiple_answers']
                 )
 
             await query.edit_message_text(f"✅ Message forwarded to {group_info['name']}!")
@@ -1865,37 +2789,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print(f"Error unmuting user: {e}")
 
-    elif query.data.startswith("delete_all_"):
-        if query.data == "delete_all_cancel":
-            await query.message.delete()
-            return
 
-        user_id = int(query.data.split("_")[2])
-        try:
-            chat = await context.bot.get_chat(user_id)
-            user_mention = f"<a href='tg://user?id={target_user.id}'>{chat.first_name}</a>"
-
-            # Delete the confirmation message
-            await query.message.delete()
-
-            # Send processing message
-            status_msg = await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"Deleting all messages from {user_mention}...",
-                parse_mode='HTML'
-            )
-
-            # Here you would implement the actual message deletion
-            # Note: Due to API limitations, we can only delete recent messages
-            # Send completion message
-            await status_msg.edit_text(
-                f"✅ Successfully deleted messages from {user_mention}",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            print(f"Error in delete_all: {e}")
-            await query.message.edit_text("❌ Failed to delete messages.")
-        return
 
     elif query.data == "back":
         # Return to muted users list
@@ -1920,28 +2814,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app = ApplicationBuilder().token(TOKEN).build()
 
+app.add_handler(CommandHandler("status", status_command))
 app.add_handler(CommandHandler("cmd", cmd_command))
 app.add_handler(CommandHandler("mg_count", mg_count_command))
+app.add_handler(CommandHandler("info", info_command))
+app.add_handler(CommandHandler("refresh", refresh_command))
 app.add_handler(CommandHandler("go", go_command))
 app.add_handler(CommandHandler("voice", voice_command))
 app.add_handler(CommandHandler("stick", stick_command))
-app.add_handler(CommandHandler("hello", hello_command))
+
 app.add_handler(CommandHandler("more", more_command))
 app.add_handler(CommandHandler("weather", weather_command))
 app.add_handler(CommandHandler("weather_c", weather_forecast_command))
-app.add_handler(CommandHandler("ask", ask_command))
 app.add_handler(CommandHandler("wiki", wiki_command))
-app.add_handler(CommandHandler("holidays", holidays_command))
-app.add_handler(CommandHandler("movie", movie_command))
 app.add_handler(CommandHandler("img", img_command))
-app.add_handler(CommandHandler("yt", yt_command))
+
+app.add_handler(CommandHandler("ai", ai_command))
 app.add_handler(CommandHandler("filter", filter_command))
 app.add_handler(CommandHandler("del", del_filter_command))
 app.add_handler(CommandHandler("filters", filters_list_command))
+app.add_handler(CommandHandler("quiz", quiz_command))
+app.add_handler(CommandHandler("set_quiz", set_quiz_command))
+app.add_handler(CommandHandler("stop_quiz", stop_quiz_command))
+app.add_handler(CommandHandler("save_setup", save_setup_command))
+app.add_handler(CommandHandler("start", start_command))
 
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute$'), mute_command))
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute_list$'), mute_list_command))
-app.add_handler(MessageHandler((filters.TEXT | filters.Sticker.ALL | filters.PHOTO) & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler((filters.TEXT | filters.Sticker.ALL | filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.VIDEO_NOTE | filters.POLL) & ~filters.COMMAND, handle_message))
 
 # Delete command handler
 async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1977,38 +2877,11 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Delete all command handler
 
-async def delete_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
 
-    # Check if user is authorized
-    if str(message.from_user.id) != "8197285353":
-        return
-
-    # Check if it's a reply
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-        user_mention = f"<a href='tg://user?id={target_user.id}'>{target_user.first_name}</a>"
-
-        # Create confirmation buttons
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Confirm Delete All", callback_data=f"delete_all_{target_user.id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="delete_all_cancel")
-            ]
-        ]
-
-        await message.delete()
-        await context.bot.send_message(
-            chat_id=message.chat_id,
-            text=f"Are you sure you want to delete all messages from {user_mention}?",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
 
 
 app.add_handler(CallbackQueryHandler(button_callback))
+app.add_handler(PollAnswerHandler(handle_poll_answer))
 
 import signal
 import sys
