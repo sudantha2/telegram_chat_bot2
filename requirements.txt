@@ -1,5 +1,3 @@
-
-
 python-telegram-bot==20.7
 Flask==2.2.5
 Pillow==9.5.0
@@ -11,3 +9,4 @@ pydub
 langdetect
 motor
 motor
+psutil
