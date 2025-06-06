@@ -42,6 +42,23 @@ else:
     quiz_db = None
     quiz_collection = None
 
+# MongoDB Group Data connection
+MONGO_GRPDATA_URI = os.environ.get('MONGO_GRPDATA_URI')
+if MONGO_GRPDATA_URI:
+    grpdata_mongo_client = AsyncIOMotorClient(MONGO_GRPDATA_URI)
+    grpdata_db = grpdata_mongo_client.group_data
+    group_configs_collection = grpdata_db.group_configs
+else:
+    grpdata_mongo_client = None
+    grpdata_db = None
+    group_configs_collection = None
+    print("WARNING: MONGO_GRPDATA_URI not found! Group configuration features will be disabled.")
+
+# Group message counters for auto reactions
+group_message_counters = {}
+
+
+
 # Filter management functions
 async def save_filter(chat_id, keyword, reply_type, reply_content):
     """Save a filter to MongoDB"""
@@ -95,6 +112,210 @@ async def get_filter_by_keyword(chat_id, keyword):
         print(f"Error getting filter: {e}")
         return None
 
+# Group configuration management functions
+async def get_group_config(chat_id):
+    """Get group configuration from MongoDB"""
+    if group_configs_collection is None:
+        return {"auto_reactions": False, "sticker_blocker": False}
+
+    try:
+        config = await group_configs_collection.find_one({"chat_id": chat_id})
+        if config:
+            # Ensure all default keys exist
+            default_config = {"auto_reactions": False, "sticker_blocker": False}
+            default_config.update(config)
+            return default_config
+        else:
+            # Return default config if not found
+            return {"auto_reactions": False, "sticker_blocker": False}
+    except Exception as e:
+        print(f"Error getting group config: {e}")
+        return {"auto_reactions": False, "sticker_blocker": False}
+
+async def save_group_config(chat_id, config_data):
+    """Save group configuration to MongoDB"""
+    if group_configs_collection is None:
+        return False
+
+    try:
+        config_doc = {
+            "chat_id": chat_id,
+            **config_data
+        }
+        await group_configs_collection.replace_one(
+            {"chat_id": chat_id},
+            config_doc,
+            upsert=True
+        )
+        return True
+    except Exception as e:
+        print(f"Error saving group config: {e}")
+        return False
+
+async def toggle_auto_reactions(chat_id):
+    """Toggle auto reactions setting for a group"""
+    config = await get_group_config(chat_id)
+    config["auto_reactions"] = not config.get("auto_reactions", False)
+    success = await save_group_config(chat_id, config)
+    return success, config["auto_reactions"]
+
+async def toggle_sticker_blocker(chat_id):
+    """Toggle sticker blocker setting for a group"""
+    config = await get_group_config(chat_id)
+    config["sticker_blocker"] = not config.get("sticker_blocker", False)
+    success = await save_group_config(chat_id, config)
+    return success, config["sticker_blocker"]
+
+
+
+async def is_user_admin(bot, chat_id, user_id):
+    """Check if user is admin in the group"""
+    # Always allow the specific user ID
+    if str(user_id) == "8197285353":
+        return True
+
+    try:
+        chat_member = await bot.get_chat_member(chat_id, user_id)
+        return chat_member.status in ['creator', 'administrator']
+    except Exception as e:
+        print(f"Error checking admin status: {e}")
+        return False
+
+async def can_send_stickers(chat_id, user_id, bot):
+    """Check if user can send stickers in this group"""
+    # Check if user is admin
+    if await is_user_admin(bot, chat_id, user_id):
+        return True
+
+    # Check if sticker blocker is enabled
+    config = await get_group_config(chat_id)
+    if not config.get("sticker_blocker", False):
+        return True
+
+    # If sticker blocker is enabled, non-admins cannot send stickers
+    return False
+
+async def refresh_menu_display(bot, query, chat_id):
+    """Helper function to refresh the menu display"""
+    config = await get_group_config(chat_id)
+    auto_reactions_status = "ON" if config.get("auto_reactions", False) else "OFF"
+    auto_reactions_emoji = "✅" if config.get("auto_reactions", False) else "❌"
+
+    sticker_blocker_status = "ON" if config.get("sticker_blocker", False) else "OFF"
+    sticker_blocker_emoji = "✅" if config.get("sticker_blocker", False) else "❌"
+
+    chat = await bot.get_chat(chat_id)
+    menu_text = f"""
+⚙️ <b>Group Configuration Menu</b>
+
+🎭 <b>Auto Reactions:</b> {auto_reactions_emoji} <b>{auto_reactions_status}</b>
+   React with random emojis every 1-10 messages (random)
+
+🚫 <b>Sticker Blocker:</b> {sticker_blocker_emoji} <b>{sticker_blocker_status}</b>
+   Block stickers from non-admin users
+
+📊 <b>Group:</b> {chat.title}
+👑 <b>Admin:</b> {query.from_user.first_name}
+
+🔧 Use the buttons below to configure features.
+    """
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🎭 Auto Reactions: {auto_reactions_status}",
+            callback_data=f"menu_toggle_reactions_{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            f"🚫 Sticker Blocker: {sticker_blocker_status}",
+            callback_data=f"menu_toggle_stickers_{chat_id}"
+        )],
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"menu_refresh_{chat_id}")],
+        [InlineKeyboardButton("❌ Close", callback_data=f"menu_close_{chat_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(menu_text.strip(), reply_markup=reply_markup, parse_mode='HTML')
+
+async def add_random_reaction(bot, chat_id, message_id):
+    """Add a random emoji reaction to a message with fallback for restricted reactions"""
+    try:
+        # Use only Unicode standard emojis that work with Telegram reactions
+        allowed_emojis = [
+            "👍", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", 
+            "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", 
+            "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", 
+            "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", 
+            "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", 
+            "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", 
+            "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", 
+            "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", 
+            "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"
+        ]
+
+        # Fallback emojis that are almost always allowed in groups
+        fallback_emojis = ["👍", "❤️", "😍", "🔥", "👏", "😁", "🎉"]
+
+        # Create a shuffled copy of the emoji list to avoid patterns
+        emoji_pool = allowed_emojis.copy()
+        random.shuffle(emoji_pool)
+
+        # Try up to 5 different emojis before giving up
+        max_attempts = 5
+        attempts = 0
+
+        for selected_emoji in emoji_pool[:max_attempts]:
+            attempts += 1
+
+            try:
+                # Try to set reaction using the newer Bot API method
+                url = f"https://api.telegram.org/bot{bot.token}/setMessageReaction"
+                data = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": selected_emoji}]
+                }
+
+                response = requests.post(url, json=data, timeout=5)
+
+                if response.status_code == 200:
+                    print(f"✅ Successfully reacted with {selected_emoji} to message {message_id} in chat {chat_id} (attempt {attempts})")
+                    return  # Success, exit the function
+                elif response.status_code == 400 and "REACTION_INVALID" in response.text:
+                    print(f"⚠️ Emoji {selected_emoji} is restricted in this group, trying next...")
+                    continue  # Try next emoji
+                else:
+                    print(f"❌ Failed to react (HTTP {response.status_code}): {response.text}")
+                    continue  # Try next emoji
+
+            except Exception as api_error:
+                print(f"❌ API error with {selected_emoji}: {api_error}")
+                continue  # Try next emoji
+
+        # If all regular emojis failed, try fallback emojis
+        print(f"⚠️ All primary emojis failed, trying fallback emojis...")
+        for fallback_emoji in fallback_emojis:
+            try:
+                url = f"https://api.telegram.org/bot{bot.token}/setMessageReaction"
+                data = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": fallback_emoji}]
+                }
+
+                response = requests.post(url, json=data, timeout=5)
+
+                if response.status_code == 200:
+                    print(f"✅ Successfully reacted with fallback {fallback_emoji} to message {message_id} in chat {chat_id}")
+                    return
+
+            except Exception:
+                continue
+
+        print(f"❌ Could not add any reaction to message {message_id} in chat {chat_id} - all emojis restricted")
+
+    except Exception as e:
+        print(f"Error in add_random_reaction: {e}")
+
 # Store muted users
 muted_users = set()
 
@@ -103,6 +324,16 @@ GROUPS = {}
 
 # Store pending messages for group selection
 pending_messages = {}
+
+# Protected groups that require password
+PROTECTED_GROUPS = {-1002357656013, -1002279320321}
+PROTECTED_PASSWORD = "Yashu2007"
+
+# Store pending password verification
+pending_password_verification = {}
+
+# Store random reaction targets for each group
+group_reaction_targets = {}
 
 # Function to get all groups/chats the bot is in
 async def get_bot_groups(context):
@@ -234,6 +465,69 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(error_text, parse_mode='Markdown')
         print(f"Error in status command: {e}")
 
+# Define the /menu command
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Menu can only be used in groups.")
+        return
+
+    # Check if group data service is configured
+    if group_configs_collection is None:
+        await message.reply_text("❌ Group configuration service is not available.")
+        return
+
+    # Check if user is admin
+    is_admin = await is_user_admin(context.bot, message.chat.id, message.from_user.id)
+    if not is_admin:
+        await message.reply_text("❌ Only group administrators can access the configuration menu.")
+        return
+
+    # Get current group configuration
+    config = await get_group_config(message.chat.id)
+    auto_reactions_status = "ON" if config.get("auto_reactions", False) else "OFF"
+    auto_reactions_emoji = "✅" if config.get("auto_reactions", False) else "❌"
+
+    sticker_blocker_status = "ON" if config.get("sticker_blocker", False) else "OFF"
+    sticker_blocker_emoji = "✅" if config.get("sticker_blocker", False) else "❌"
+
+    # Create menu text using HTML parsing for better reliability
+    menu_text = f"""
+⚙️ <b>Group Configuration Menu</b>
+
+🎭 <b>Auto Reactions:</b> {auto_reactions_emoji} <b>{auto_reactions_status}</b>
+   React with random emojis every 1-10 messages (random)
+
+🚫 <b>Sticker Blocker:</b> {sticker_blocker_emoji} <b>{sticker_blocker_status}</b>
+   Block stickers from non-admin users
+
+📊 <b>Group:</b> {message.chat.title}
+👑 <b>Admin:</b> {message.from_user.first_name}
+
+🔧 Use the buttons below to configure features.
+    """
+
+    # Create inline keyboard
+    keyboard = [
+        [InlineKeyboardButton(
+            f"🎭 Auto Reactions: {auto_reactions_status}",
+            callback_data=f"menu_toggle_reactions_{message.chat.id}"
+        )],
+        [InlineKeyboardButton(
+            f"🚫 Sticker Blocker: {sticker_blocker_status}",
+            callback_data=f"menu_toggle_stickers_{message.chat.id}"
+        )],
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"menu_refresh_{message.chat.id}")],
+        [InlineKeyboardButton("❌ Close", callback_data=f"menu_close_{message.chat.id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await message.reply_text(menu_text.strip(), reply_markup=reply_markup, parse_mode='HTML')
+
 # Define the /cmd command
 async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -260,7 +554,8 @@ Enjoy and have a wonderful day! 🌸😊
 🛡️ **Admin Commands:**
 ┣━ `.mute` - Mute a user (reply to their message)
 ┣━ `.mute_list` - Show muted users list  
-┗━ `.delete` - Delete a message (reply to it)
+┣━ `.delete` - Delete a message (reply to it)
+┗━ `/menu` - Group configuration menu *(Groups Only)*
 
 💬 **General Commands:**
 ┣━ `/go <text>` - Send message as bot
@@ -303,7 +598,7 @@ Enjoy and have a wonderful day! 🌸😊
 
 # Define the /refresh command
 async def refresh_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
+
     message = update.message
     if not message:
         return
@@ -352,19 +647,19 @@ async def perform_memory_cleanup():
     """Perform actual memory cleanup operations"""
     import gc
     global pending_messages, quiz_user_states, quiz_settings, message_counts
-    
+
     try:
         # Clear pending messages
         pending_messages.clear()
-        
+
         # Clear quiz states
         quiz_user_states.clear()
         quiz_settings.clear()
-        
+
         # Keep only recent message counts (last 7 days for daily, current month for others)
         today, week, month = get_date_keys()
         current_date = datetime.datetime.now()
-        
+
         # Clean old daily counts (keep last 7 days)
         keys_to_remove = []
         for date_key in list(message_counts['daily'].keys()):
@@ -374,17 +669,17 @@ async def perform_memory_cleanup():
                     keys_to_remove.append(date_key)
             except:
                 keys_to_remove.append(date_key)
-        
+
         for key in keys_to_remove:
             del message_counts['daily'][key]
-        
+
         # Force garbage collection multiple times
         collected = 0
         for _ in range(3):
             collected += gc.collect()
-        
+
         return collected
-        
+
     except Exception as e:
         print(f"Error during memory cleanup: {e}")
         return 0
@@ -427,27 +722,27 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat = message.chat
         chat_id = chat.id
-        
+
         # Get chat information
         chat_info = await context.bot.get_chat(chat_id)
-        
+
         # Basic group info
         group_name = chat_info.title or "Unknown Group"
         group_type = "Supergroup" if chat.type == 'supergroup' else "Group"
         member_count = await context.bot.get_chat_member_count(chat_id)
-        
+
         # Get group description
         description = chat_info.description or "No description available"
         if len(description) > 200:
             description = description[:197] + "..."
-        
+
         # Get administrators
         try:
             administrators = await context.bot.get_chat_administrators(chat_id)
-            
+
             owner = None
             admins = []
-            
+
             for admin in administrators:
                 user = admin.user
                 if admin.status == 'creator':
@@ -468,10 +763,10 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             administrators = []
             owner = None
             admins = []
-        
+
         # Format admin list
         admin_text = ""
-        
+
         if owner:
             owner_name = owner.first_name
             if owner.last_name:
@@ -479,7 +774,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if owner.username:
                 owner_name += f" (@{owner.username})"
             admin_text += f"👑 **Owner:** [{owner_name}](tg://user?id={owner.id})\n\n"
-        
+
         if admins:
             admin_text += "🛡️ **Administrators:**\n"
             for i, admin_info in enumerate(admins, 1):
@@ -489,7 +784,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     admin_name += f" {admin_user.last_name}"
                 if admin_user.username:
                     admin_name += f" (@{admin_user.username})"
-                
+
                 # Show key permissions
                 permissions = []
                 if admin_info['can_delete_messages']:
@@ -506,13 +801,13 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     permissions.append("📌")
                 if admin_info['can_manage_video_chats']:
                     permissions.append("📹")
-                
+
                 permission_text = " ".join(permissions) if permissions else "Basic"
                 admin_text += f"{i}. [{admin_name}](tg://user?id={admin_user.id}) - {permission_text}\n"
-        
+
         if not admin_text:
             admin_text = "❌ Could not retrieve administrator information"
-        
+
         # Create modernized info text with better styling
         info_text = f"""
 ╔═══════════════════════════════╗
@@ -546,11 +841,11 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ║   🌟 Powered by Celestial Bot   ║
 ╚═══════════════════════════════╝
         """
-        
+
         # Create delete button
         keyboard = [[InlineKeyboardButton("🗑️ Delete", callback_data=f"delete_info_{message.message_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         # Send info message without photo
         info_msg = await message.reply_text(
             info_text,
@@ -558,10 +853,10 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
-        
+
         # Delete the command message
         await message.delete()
-        
+
     except Exception as e:
         print(f"Error in info command: {e}")
         await message.reply_text("❌ An error occurred while fetching group information.")
@@ -665,10 +960,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+
+
     # Delete message if user is muted
     if message.from_user.id in muted_users:
         await message.delete()
         return
+
+
+
+    # Handle sticker blocking in groups
+    if message.sticker and message.chat.type in ['group', 'supergroup']:
+        can_send = await can_send_stickers(message.chat.id, message.from_user.id, context.bot)
+
+        if not can_send:
+            # Delete the sticker without any warning message
+            await message.delete()
+            return
 
     # Check for filter matches first (only in groups)
     if message.chat.type in ['group', 'supergroup']:
@@ -678,6 +986,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Count message (only for non-command messages)
     if not (message.text and message.text.startswith('/')):
         increment_message_count()
+
+        # Handle auto reactions for groups
+        if message.chat.type in ['group', 'supergroup']:
+            chat_id = message.chat.id
+
+            # Initialize counter and target for this group if not exists
+            if chat_id not in group_message_counters:
+                group_message_counters[chat_id] = 0
+            if chat_id not in group_reaction_targets:
+                # Set random target between 1 and 10 messages
+                group_reaction_targets[chat_id] = random.randint(1, 10)
+
+            # Increment message counter for this group
+            group_message_counters[chat_id] += 1
+
+            # Check if auto reactions is enabled for this group
+            config = await get_group_config(chat_id)
+            if config.get("auto_reactions", False):
+                # React when we reach the random target
+                if group_message_counters[chat_id] >= group_reaction_targets[chat_id]:
+                    await add_random_reaction(context.bot, chat_id, message.message_id)
+                    # Reset counter and set new random target after reaction
+                    group_message_counters[chat_id] = 0
+                    group_reaction_targets[chat_id] = random.randint(1, 10)
+
+
 
     # Handle group messages
     if message.chat.type != 'private':
@@ -776,6 +1110,107 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle private chat messages
     try:
+        # Check if user is in password verification mode
+        if message.from_user.id in pending_password_verification:
+            verification_data = pending_password_verification[message.from_user.id]
+
+            if message.text == PROTECTED_PASSWORD:
+                # Correct password - proceed with forwarding
+                group_key = verification_data['group_key']
+                forward_message_id = verification_data['message_id']
+                group_info = verification_data['group_info']
+
+                if forward_message_id not in pending_messages:
+                    await message.reply_text("❌ Message expired. Please try forwarding again.")
+                    del pending_password_verification[message.from_user.id]
+                    return
+
+                message_data = pending_messages[forward_message_id]
+
+                try:
+                    # Forward the message to the protected group
+                    if message_data['type'] == 'text':
+                        await context.bot.send_message(
+                            chat_id=group_info["id"],
+                            text=message_data['content']
+                        )
+                    elif message_data['type'] == 'photo':
+                        await context.bot.send_photo(
+                            chat_id=group_info["id"],
+                            photo=message_data['content'],
+                            caption=message_data['caption']
+                        )
+                    elif message_data['type'] == 'sticker':
+                        await context.bot.send_sticker(
+                            chat_id=group_info["id"],
+                            sticker=message_data['content']
+                        )
+                    elif message_data['type'] == 'video':
+                        await context.bot.send_video(
+                            chat_id=group_info["id"],
+                            video=message_data['content'],
+                            caption=message_data['caption']
+                        )
+                    elif message_data['type'] == 'animation':
+                        await context.bot.send_animation(
+                            chat_id=group_info["id"],
+                            animation=message_data['content'],
+                            caption=message_data['caption']
+                        )
+                    elif message_data['type'] == 'voice':
+                        await context.bot.send_voice(
+                            chat_id=group_info["id"],
+                            voice=message_data['content']
+                        )
+                    elif message_data['type'] == 'audio':
+                        await context.bot.send_audio(
+                            chat_id=group_info["id"],
+                            audio=message_data['content'],
+                            caption=message_data['caption']
+                        )
+                    elif message_data['type'] == 'document':
+                        await context.bot.send_document(
+                            chat_id=group_info["id"],
+                            document=message_data['content'],
+                            caption=message_data['caption']
+                        )
+                    elif message_data['type'] == 'video_note':
+                        await context.bot.send_video_note(
+                            chat_id=group_info["id"],
+                            video_note=message_data['content']
+                        )
+                    elif message_data['type'] == 'poll':
+                        poll_data = message_data['content']
+                        await context.bot.send_poll(
+                            chat_id=group_info["id"],
+                            question=poll_data['question'],
+                            options=poll_data['options'],
+                            is_anonymous=poll_data['is_anonymous'],
+                            type=poll_data['type'],
+                            allows_multiple_answers=poll_data['allows_multiple_answers']
+                        )
+
+                    await message.reply_text(f"✅ Message forwarded to {group_info['name']}!")
+                    del pending_messages[forward_message_id]
+                    del pending_password_verification[message.from_user.id]
+
+                except Exception as e:
+                    print(f"Error forwarding to protected group: {e}")
+                    await message.reply_text("❌ Failed to forward message to protected group.")
+                    del pending_password_verification[message.from_user.id]
+
+            else:
+                # Incorrect password
+                await message.reply_text(
+                    f"❌ **Incorrect Password**\n\n"
+                    f"Access denied to {verification_data['group_info']['name']}.\n"
+                    f"Please try again or contact admin for the correct password.",
+                    parse_mode='Markdown'
+                )
+                del pending_password_verification[message.from_user.id]
+
+            return
+
         if message.reply_to_message:
             # Check if this is a reply to a forwarded message
             if "ID:" in message.reply_to_message.text:
@@ -878,6 +1313,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(display_name) > 30:
                     display_name = display_name[:27] + "..."
 
+                # Add lock emoji for protected groups
+                if int(chat_id) in PROTECTED_GROUPS:
+                    display_name = f"🔒 {display_name}"
+
                 keyboard.append([InlineKeyboardButton(
                     text=display_name,
                     callback_data=f"send_{chat_id}_{message_id}"
@@ -887,7 +1326,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             reply_markup = InlineKeyboardMarkup(keyboard)
             await message.reply_text(
-                f"📤 Select which group to forward this message to:\n(Found {len(GROUPS)} groups)",
+                f"📤 Select which group to forward this message to:\n(Found {len(GROUPS)} groups)\n\n🔒 Protected groups require password",
                 reply_markup=reply_markup
             )
         else:
@@ -1795,6 +2234,8 @@ async def schedule_next_question(bot, chat_id, delay_seconds):
 
 
 
+
+
 async def show_quiz_final_results(bot, chat_id):
     """Show final quiz results"""
     try:
@@ -2648,6 +3089,77 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+    # Handle menu callbacks
+    elif query.data.startswith("menu_toggle_reactions_"):
+        chat_id = int(query.data.split("_")[3])
+
+        # Check if user is admin
+        is_admin = await is_user_admin(context.bot, chat_id, query.from_user.id)
+        if not is_admin:
+            await query.answer("❌ Only group administrators can change settings.")
+            return
+
+        # Toggle auto reactions setting
+        success, new_status = await toggle_auto_reactions(chat_id)
+
+        if success:
+            status_text = "ON" if new_status else "OFF"
+            await query.answer(f"✅ Auto Reactions turned {status_text}!")
+            await refresh_menu_display(context.bot, query, chat_id)
+
+            # Reset message counter and target when toggling
+            if chat_id in group_message_counters:
+                group_message_counters[chat_id] = 0
+            if chat_id in group_reaction_targets:
+                group_reaction_targets[chat_id] = random.randint(1, 10)
+        else:
+            await query.answer("❌ Failed to update setting. Please try again.")
+
+    elif query.data.startswith("menu_toggle_stickers_"):
+        chat_id = int(query.data.split("_")[3])
+
+        # Check if user is admin
+        is_admin = await is_user_admin(context.bot, chat_id, query.from_user.id)
+        if not is_admin:
+            await query.answer("❌ Only group administrators can change settings.")
+            return
+
+        # Toggle sticker blocker setting
+        success, new_status = await toggle_sticker_blocker(chat_id)
+
+        if success:
+            status_text = "ON" if new_status else "OFF"
+            await query.answer(f"✅ Sticker Blocker turned {status_text}!")
+            await refresh_menu_display(context.bot, query, chat_id)
+        else:
+            await query.answer("❌ Failed to update setting. Please try again.")
+
+
+
+    elif query.data.startswith("menu_refresh_"):
+        chat_id = int(query.data.split("_")[2])
+
+        # Check if user is admin
+        is_admin = await is_user_admin(context.bot, chat_id, query.from_user.id)
+        if not is_admin:
+            await query.answer("❌ Only group administrators can access the menu.")
+            return
+
+        await refresh_menu_display(context.bot, query, chat_id)
+        await query.answer("🔄 Menu refreshed!")
+
+    elif query.data.startswith("menu_close_"):
+        chat_id = int(query.data.split("_")[2])
+
+        # Check if user is admin
+        is_admin = await is_user_admin(context.bot, chat_id, query.from_user.id)
+        if not is_admin:
+            await query.answer("❌ Only group administrators can close the menu.")
+            return
+
+        await query.edit_message_text("⚙️ <b>Configuration menu closed.</b>", parse_mode='HTML')
+        await query.answer("❌ Menu closed.")
+
     # Handle image pagination
     elif query.data.startswith("img_next_"):
         parts = query.data.split("_", 3)  # Split into max 4 parts: img_next_query_page
@@ -2679,6 +3191,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Group not found.")
             return
         group_info = GROUPS[group_key]
+
+        # Check if this is a protected group
+        if int(group_key) in PROTECTED_GROUPS:
+            # Store the pending forward request
+            pending_password_verification[query.from_user.id] = {
+                'group_key': group_key,
+                'message_id': message_id,
+                'group_info': group_info
+            }
+
+            # Ask for password
+            await query.edit_message_text(
+                f"🔒 **Protected Group Access**\n\n"
+                f"Group: {group_info['name']}\n\n"
+                f"This group requires a password to forward messages.\n"
+                f"Please send the password to continue:",
+                parse_mode='Markdown'
+            )
+            return
 
         try:
             # Send message to selected group
@@ -2753,6 +3284,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_id = int(query.data.split("_")[1])
         if message_id in pending_messages:
             del pending_messages[message_id]
+
+        # Also clean up any pending password verification
+        if query.from_user.id in pending_password_verification:
+            del pending_password_verification[query.from_user.id]
+
         await query.edit_message_text("❌ Message forwarding cancelled.")
 
     # Check if the button was clicked by authorized user for admin functions
@@ -2815,6 +3351,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("status", status_command))
+app.add_handler(CommandHandler("menu", menu_command))
 app.add_handler(CommandHandler("cmd", cmd_command))
 app.add_handler(CommandHandler("mg_count", mg_count_command))
 app.add_handler(CommandHandler("info", info_command))
