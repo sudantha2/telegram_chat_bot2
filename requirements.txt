@@ -10,3 +10,4 @@ langdetect
 motor
 motor
 psutil
+emoji
