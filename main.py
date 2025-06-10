@@ -2044,45 +2044,124 @@ async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Check for unused questions
-        unused_questions = await quiz_collection.find({"used": False}).to_list(length=None)
+        # Get available quiz sets (exclude used ones)
+        quiz_sets = await quiz_collection.find({
+            "quiz_name": {"$exists": True},
+            "question_count": {"$gt": 0},
+            "used": {"$ne": True}
+        }).to_list(length=None)
 
-        if not unused_questions:
-            # No unused questions available
+        if not quiz_sets:
+            # No quiz sets available
             bot_username = context.bot.username
             quiz_link = f"https://t.me/{bot_username}?start=set_quiz"
 
-            keyboard = [[InlineKeyboardButton("📝 ADD QUESTIONS", url=quiz_link)]]
+            keyboard = [[InlineKeyboardButton("📝 CREATE QUIZ SET", url=quiz_link)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await message.reply_text(
-                "❌ My database doesn't have unused questions. Please add questions before using this feature.",
+                "❌ No quiz sets available. Please create quiz sets before starting a quiz.",
                 reply_markup=reply_markup
             )
             return
 
-        # Ask for number of questions first
-        keyboard = [
-            [InlineKeyboardButton("5️⃣", callback_data=f"quiz_select_5_{chat_id}")],
-            [InlineKeyboardButton("🔟", callback_data=f"quiz_select_10_{chat_id}")],
-            [InlineKeyboardButton("1️⃣5️⃣", callback_data=f"quiz_select_15_{chat_id}")],
-            [InlineKeyboardButton("2️⃣0️⃣", callback_data=f"quiz_select_20_{chat_id}")],
-            [InlineKeyboardButton("2️⃣5️⃣", callback_data=f"quiz_select_25_{chat_id}")]
-        ]
+        # Show available quiz sets
+        keyboard = []
+        for quiz_set in quiz_sets[:10]:  # Limit to 10 quiz sets
+            quiz_name = quiz_set['quiz_name'][:30]  # Truncate long names
+            question_count = quiz_set.get('question_count', 0)
+
+            keyboard.append([InlineKeyboardButton(
+                f"🎯 {quiz_name} ({question_count} Q)",
+                callback_data=f"select_quiz_set_{quiz_set['_id']}"
+            )])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await message.reply_text(
-            f"🎯 **Quiz Setup**\n\n📊 Available unused questions: {len(unused_questions)}\n\n🔢 How many questions do you want for this quiz?",
+            f"🎯 **Select Quiz Set**\n\n📊 Found {len(quiz_sets)} quiz sets:\n\nChoose a quiz set to start:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
 
-        # Store available questions temporarily
-        quiz_settings[f"available_{chat_id}"] = unused_questions
-
     except Exception as e:
         print(f"Error in quiz command: {e}")
         await message.reply_text("❌ An error occurred while starting the quiz.")
+
+# Quiz ID command for direct quiz access
+async def quiz_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in groups
+    if message.chat.type == 'private':
+        await message.reply_text("❌ Quiz can only be started in groups.")
+        return
+
+    # Check if quiz database is configured
+    if quiz_collection is None:
+        await message.reply_text("❌ Quiz service is not configured.")
+        return
+
+    chat_id = message.chat.id
+
+    # Check if quiz is already running
+    if chat_id in active_quizzes:
+        await message.reply_text("❌ A quiz is already running in this group!")
+        return
+
+    # Extract quiz ID from command
+    command_text = message.text
+    if not command_text.startswith('/quiz_'):
+        return
+
+    quiz_id_str = command_text[6:]  # Remove '/quiz_' prefix
+
+    try:
+        from bson import ObjectId
+        quiz_set_id = ObjectId(quiz_id_str)
+
+        # Get quiz set details
+        quiz_set = await quiz_collection.find_one({"_id": quiz_set_id})
+        if not quiz_set:
+            await message.reply_text("❌ Quiz set not found with this ID.")
+            return
+
+        # Get questions for this quiz set
+        questions = await quiz_collection.find({
+            "quiz_set_id": quiz_set_id,
+            "question_text": {"$exists": True}
+        }).sort("question_number", 1).to_list(length=None)
+
+        if not questions:
+            await message.reply_text("❌ No questions found in this quiz set.")
+            return
+
+        quiz_name = quiz_set['quiz_name']
+        description = quiz_set.get('description', 'No description')
+        question_count = len(questions)
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Start Quiz", callback_data=f"start_quiz_set_{quiz_set_id}_{chat_id}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_quiz_{chat_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await message.reply_text(
+            f"🎯 **Quiz Set Found**\n\n"
+            f"📝 **Name:** {quiz_name}\n"
+            f"📋 **Description:** {description}\n"
+            f"🎯 **Questions:** {question_count}\n"
+            f"⏱️ **Time per question:** 30 seconds\n\n"
+            f"Ready to start the quiz?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        print(f"Error in quiz_id command: {e}")
+        await message.reply_text("❌ Invalid quiz ID or error occurred.")
 
 # Stop quiz command for group chats
 async def stop_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2153,14 +2232,9 @@ async def start_quiz_countdown(bot, chat_id):
         print(f"Error in quiz countdown: {e}")
 
 async def send_quiz_poll(bot, chat_id, question):
-    """Send a quiz question using Telegram poll"""
+    """Send a quiz question using Telegram poll with media support"""
     try:
-        question_text = None
-        for key, value in question.items():
-            if key.startswith('question'):
-                question_text = value
-                break
-
+        question_text = question.get('question_text')
         if not question_text:
             await bot.send_message(chat_id, "❌ Invalid question format.")
             return
@@ -2171,7 +2245,7 @@ async def send_quiz_poll(bot, chat_id, question):
             return
 
         # Find correct answer index
-        correct_answer = question.get('correct')
+        correct_answer = question.get('correct_answer')
         correct_index = 0
         for i, option in enumerate(options):
             if option == correct_answer:
@@ -2181,6 +2255,41 @@ async def send_quiz_poll(bot, chat_id, question):
         quiz_session = active_quizzes[chat_id]
         current_q = quiz_session['current_index'] + 1
         total_q = quiz_session['total_questions']
+
+        # Send media if exists
+        media_type = question.get('media_type')
+        media_file_id = question.get('media_file_id')
+
+        if media_type and media_file_id:
+            try:
+                if media_type == 'photo':
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=media_file_id,
+                        caption=f"🎯 **Question {current_q}/{total_q}**\n\n{question_text}",
+                        parse_mode='Markdown'
+                    )
+                elif media_type == 'audio':
+                    await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=media_file_id,
+                        caption=f"🎯 **Question {current_q}/{total_q}**\n\n{question_text}",
+                        parse_mode='Markdown'
+                    )
+                elif media_type == 'video':
+                    await bot.send_video(
+                        chat_id=chat_id,
+                        video=media_file_id,
+                        caption=f"🎯 **Question {current_q}/{total_q}**\n\n{question_text}",
+                        parse_mode='Markdown'
+                    )
+
+                # Small delay before sending poll
+                await asyncio.sleep(1)
+
+            except Exception as media_error:
+                print(f"Error sending media: {media_error}")
+                # Continue with text-only question if media fails
 
         # Send poll
         poll = await bot.send_poll(
@@ -2342,7 +2451,7 @@ async def save_setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Get current progress
     state = quiz_user_states[user_id]
     current_num = state.get('current_question_num', 1)
-    total_num = state.get('total_questions', 0)
+    quiz_name = state.get('quiz_name', 'Unknown Quiz')
 
     # Clean up user state
     del quiz_user_states[user_id]
@@ -2352,13 +2461,246 @@ async def save_setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Send confirmation message
     if current_num > 1:
         questions_added = current_num - 1
-        await message.reply_text(
-            f"✅ **Setup saved!**\n\n📝 Questions added: {questions_added}/{total_num}\n\n🔄 You are now back to normal private chat mode.\nYou can forward messages to groups again."
-        )
+        quiz_set_id = state.get('quiz_set_id')
+
+        if quiz_set_id:
+            await message.reply_text(
+                f"✅ **Quiz Set Saved!**\n\n"
+                f"📝 **Quiz:** {quiz_name}\n"
+                f"🎯 **Questions added:** {questions_added}\n"
+                f"🆔 **Quiz ID:** `{quiz_set_id}`\n\n"
+                f"📋 **How to use in groups:**\n"
+                f"Send `/quiz_{quiz_set_id}` in any group to start this specific quiz\n\n"
+                f"🔄 You are now back to normal private chat mode.\n"
+                f"You can forward messages to groups again.",
+                parse_mode='Markdown'
+            )
+        else:
+            await message.reply_text(
+                f"✅ **Quiz Set Saved!**\n\n"
+                f"📝 **Quiz:** {quiz_name}\n"
+                f"🎯 **Questions added:** {questions_added}\n\n"
+                f"🔄 You are now back to normal private chat mode.\n"
+                f"You can forward messages to groups again.",
+                parse_mode='Markdown'
+            )
     else:
         await message.reply_text(
             "✅ **Setup exited!**\n\n🔄 You are now back to normal private chat mode.\nYou can forward messages to groups again."
         )
+
+# Skip command for quiz setup
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in private chats
+    if message.chat.type != 'private':
+        await message.reply_text("❌ This command can only be used in private chat.")
+        return
+
+    user_id = message.from_user.id
+
+    # Check if user is in quiz setup mode
+    if user_id not in quiz_user_states:
+        await message.reply_text("❌ You are not currently in question adding mode.")
+        return
+
+    state = quiz_user_states[user_id]
+    step = state.get('step')
+
+    if step == 'quiz_description':
+        state['quiz_description'] = f"Quiz set: {state['quiz_name']}"
+        quiz_set_id = await create_quiz_set(user_id, state['quiz_name'], state['quiz_description'])
+        state['quiz_set_id'] = quiz_set_id
+        state['step'] = 'question_text'
+        state['current_question_num'] = 1
+
+        await message.reply_text(
+            f"⏭️ **Description skipped!**\n\n"
+            f"🎯 **Question 1**\n"
+            f"Enter the question text:",
+            parse_mode='Markdown'
+        )
+    elif step == 'awaiting_media':
+        state['step'] = 'option_1'
+        await message.reply_text("⏭️ **Media skipped!** Now enter option 1:")
+    else:
+        await message.reply_text("❌ Nothing to skip at this step.")
+
+# Undo command for quiz setup
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message:
+        return
+
+    # Only work in private chats
+    if message.chat.type != 'private':
+        await message.reply_text("❌ This command can only be used in private chat.")
+        return
+
+    user_id = message.from_user.id
+
+    # Check if user is in quiz setup mode
+    if user_id not in quiz_user_states:
+        await message.reply_text("❌ You are not currently in question adding mode.")
+        return
+
+    state = quiz_user_states[user_id]
+    quiz_set_id = state.get('quiz_set_id')
+
+    if not quiz_set_id:
+        await message.reply_text("❌ No questions to undo yet.")
+        return
+
+    # Delete last question
+    success, question_num = await delete_last_quiz_question(user_id, quiz_set_id)
+
+    if success and question_num > 0:
+        # Reset to question creation for the deleted question number
+        state['current_question_num'] = question_num
+        state['step'] = 'question_text'
+
+        await message.reply_text(
+            f"↩️ **Question {question_num} deleted!**\n\n"
+            f"🎯 **Question {question_num}** (retry)\n"
+            f"Enter the question text:",
+            parse_mode='Markdown'
+        )
+    else:
+        await message.reply_text("❌ No questions found to undo.")
+
+# Button command handlers
+async def save_setup_command_from_button(query, context):
+    user_id = query.from_user.id
+
+    if user_id not in quiz_user_states:
+        await query.edit_message_text("❌ You are not currently in question adding mode.")
+        return
+
+    # Get current progress
+    state = quiz_user_states[user_id]
+    current_num = state.get('current_question_num', 1)
+    quiz_name = state.get('quiz_name', 'Unknown Quiz')
+    quiz_set_id = state.get('quiz_set_id')
+
+    # Clean up user state
+    del quiz_user_states[user_id]
+    if user_id in quiz_settings:
+        del quiz_settings[user_id]
+
+    # Send confirmation message
+    if current_num > 1:
+        questions_added = current_num - 1
+
+        if quiz_set_id:
+            await query.edit_message_text(
+                f"✅ **Quiz Set Saved!**\n\n"
+                f"📝 **Quiz:** {quiz_name}\n"
+                f"🎯 **Questions added:** {questions_added}\n"
+                f"🆔 **Quiz ID:** `{quiz_set_id}`\n\n"
+                f"📋 **How to use in groups:**\n"
+                f"Send `/quiz_{quiz_set_id}` in any group to start this specific quiz\n\n"
+                f"🔄 You are now back to normal private chat mode.\n"
+                f"You can forward messages to groups again.",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"✅ **Quiz Set Saved!**\n\n"
+                f"📝 **Quiz:** {quiz_name}\n"
+                f"🎯 **Questions added:** {questions_added}\n\n"
+                f"🔄 You are now back to normal private chat mode.\n"
+                f"You can forward messages to groups again.",
+                parse_mode='Markdown'
+            )
+    else:
+        await query.edit_message_text(
+            "✅ **Setup exited!**\n\n🔄 You are now back to normal private chat mode.\nYou can forward messages to groups again."
+        )
+
+async def skip_command_from_button(query, context):
+    user_id = query.from_user.id
+
+    if user_id not in quiz_user_states:
+        await query.edit_message_text("❌ You are not currently in question adding mode.")
+        return
+
+    state = quiz_user_states[user_id]
+    step = state.get('step')
+
+    if step == 'quiz_description':
+        state['quiz_description'] = f"Quiz set: {state['quiz_name']}"
+        quiz_set_id = await create_quiz_set(user_id, state['quiz_name'], state['quiz_description'])
+        state['quiz_set_id'] = quiz_set_id
+        state['step'] = 'question_text'
+        state['current_question_num'] = 1
+
+        keyboard = [
+            [
+                InlineKeyboardButton("💾 /save_setup", callback_data="cmd_save_setup"),
+                InlineKeyboardButton("⏭️ /skip", callback_data="cmd_skip")
+            ],
+            [InlineKeyboardButton("↩️ /undo", callback_data="cmd_undo")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"⏭️ **Description skipped!**\n\n"
+            f"🎯 **Question 1**\n"
+            f"Enter the question text:\n\n"
+            f"💡 **Quick Commands:**",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    elif step == 'awaiting_media':
+        state['step'] = 'option_1'
+        await query.edit_message_text("⏭️ **Media skipped!** Now enter option 1:")
+    else:
+        await query.edit_message_text("❌ Nothing to skip at this step.")
+
+async def undo_command_from_button(query, context):
+    user_id = query.from_user.id
+
+    if user_id not in quiz_user_states:
+        await query.edit_message_text("❌ You are not currently in question adding mode.")
+        return
+
+    state = quiz_user_states[user_id]
+    quiz_set_id = state.get('quiz_set_id')
+
+    if not quiz_set_id:
+        await query.edit_message_text("❌ No questions to undo yet.")
+        return
+
+    # Delete last question
+    success, question_num = await delete_last_quiz_question(user_id, quiz_set_id)
+
+    if success and question_num > 0:
+        # Reset to question creation for the deleted question number
+        state['current_question_num'] = question_num
+        state['step'] = 'question_text'
+
+        keyboard = [
+            [
+                InlineKeyboardButton("💾 /save_setup", callback_data="cmd_save_setup"),
+                InlineKeyboardButton("⏭️ /skip", callback_data="cmd_skip")
+            ],
+            [InlineKeyboardButton("↩️ /undo", callback_data="cmd_undo")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"↩️ **Question {question_num} deleted!**\n\n"
+            f"🎯 **Question {question_num}** (retry)\n"
+            f"Enter the question text:\n\n"
+            f"💡 **Quick Commands:**",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text("❌ No questions found to undo.")
 
 # Set quiz command for private chats
 async def set_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2378,22 +2720,17 @@ async def set_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = message.from_user.id
 
-    # Initialize user state
-    quiz_user_states[user_id] = {'step': 'count_selection'}
-
-    # Ask for question count directly (skip time selection for now)
-    keyboard = [
-        [InlineKeyboardButton("🔢 10", callback_data="quiz_count_10")],
-        [InlineKeyboardButton("🔢 15", callback_data="quiz_count_15")],
-        [InlineKeyboardButton("🔢 20", callback_data="quiz_count_20")],
-        [InlineKeyboardButton("🔢 25", callback_data="quiz_count_25")],
-        [InlineKeyboardButton("🔢 30", callback_data="quiz_count_30")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Initialize user state for quiz set creation
+    quiz_user_states[user_id] = {'step': 'quiz_name'}
 
     await message.reply_text(
-        "🔢 How many questions do you want to add?",
-        reply_markup=reply_markup
+        "📝 **Create New Quiz Set**\n\n"
+        "🏷️ Enter a name for your quiz set:\n\n"
+        "**Example:** `General Knowledge Quiz`\n"
+        "**Example:** `History Quiz - World War II`\n"
+        "**Example:** `Science Quiz - Physics`\n\n"
+        "💡 **Tip:** Use descriptive names to easily identify your quiz sets later.",
+        parse_mode='Markdown'
     )
 
 async def handle_quiz_setup_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2410,74 +2747,259 @@ async def handle_quiz_setup_message(update: Update, context: ContextTypes.DEFAUL
     step = state.get('step')
 
     try:
-        if step == 'question_text':
-            state['current_question'] = {'text': message.text}
-            state['step'] = 'option_1'
-            await message.reply_text("📝 Enter option 1:")
+        if step == 'quiz_name':
+            if message.text:
+                state['quiz_name'] = message.text
+                state['step'] = 'quiz_description'
+                await message.reply_text(
+                    "📋 **Enter a description for your quiz set:**\n\n"
+                    "**Example:** `Test your knowledge about world history, including major events, wars, and civilizations.`\n\n"
+                    "💡 **Tip:** Use /skip to skip description and go directly to adding questions.",
+                    parse_mode='Markdown'
+                )
+            else:
+                await message.reply_text("❌ Please enter a valid quiz name.")
+
+        elif step == 'quiz_description':
+            if message.text:
+                if message.text == '/skip':
+                    state['quiz_description'] = f"Quiz set: {state['quiz_name']}"
+                else:
+                    state['quiz_description'] = message.text
+
+                # Create quiz set in database
+                quiz_set_id = await create_quiz_set(user_id, state['quiz_name'], state['quiz_description'])
+                state['quiz_set_id'] = quiz_set_id
+                state['step'] = 'question_text'
+                state['current_question_num'] = 1
+
+                # Create command buttons
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💾 /save_setup", callback_data="cmd_save_setup"),
+                        InlineKeyboardButton("⏭️ /skip", callback_data="cmd_skip")
+                    ],
+                    [InlineKeyboardButton("↩️ /undo", callback_data="cmd_undo")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await message.reply_text(
+                    f"✅ **Quiz Set Created!**\n\n"
+                    f"📝 **Name:** {state['quiz_name']}\n"
+                    f"📋 **Description:** {state['quiz_description']}\n\n"
+                    f"🎯 **Question 1**\n"
+                    f"Enter the question text:\n\n"
+                    f"💡 **Quick Commands:**",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await message.reply_text("❌ Please enter a valid description or use /skip.")
+
+        elif step == 'question_text':
+            if message.text:
+                # Initialize question with media support
+                state['current_question'] = {
+                    'text': message.text,
+                    'media_type': None,
+                    'media_file_id': None
+                }
+                state['step'] = 'question_media'
+
+                keyboard = [
+                    [InlineKeyboardButton("📝 Text Only", callback_data="media_skip")],
+                    [InlineKeyboardButton("📷 Add Photo", callback_data="media_photo")],
+                    [InlineKeyboardButton("🎵 Add Audio", callback_data="media_audio")],
+                    [InlineKeyboardButton("🎬 Add Video", callback_data="media_video")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await message.reply_text(
+                    "🎨 **Add Media to Question?**\n\n"
+                    "Choose if you want to add media to this question:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            else:
+                await message.reply_text("❌ Please enter a valid question text.")
+
+        elif step == 'awaiting_media':
+            # Handle media upload
+            media_type = state.get('awaiting_media_type')
+            file_id = None
+
+            if media_type == 'photo' and message.photo:
+                file_id = message.photo[-1].file_id
+            elif media_type == 'audio' and (message.audio or message.voice):
+                file_id = message.audio.file_id if message.audio else message.voice.file_id
+            elif media_type == 'video' and message.video:
+                file_id = message.video.file_id
+
+            if file_id:
+                state['current_question']['media_type'] = media_type
+                state['current_question']['media_file_id'] = file_id
+                state['step'] = 'option_1'
+                await message.reply_text("✅ Media added! Now enter option 1:")
+            else:
+                await message.reply_text(f"❌ Please send a valid {media_type} file, or use /skip to continue without media.")
 
         elif step == 'option_1':
-            state['current_question']['options'] = [message.text]
-            state['step'] = 'option_2'
-            await message.reply_text("📝 Enter option 2:")
+            if message.text:
+                state['current_question']['options'] = [message.text]
+                state['step'] = 'option_2'
+                await message.reply_text("📝 Enter option 2:")
+            else:
+                await message.reply_text("❌ Please enter text for option 1.")
 
         elif step == 'option_2':
-            state['current_question']['options'].append(message.text)
-            state['step'] = 'option_3'
-            await message.reply_text("📝 Enter option 3:")
+            if message.text:
+                state['current_question']['options'].append(message.text)
+                state['step'] = 'option_3'
+                await message.reply_text("📝 Enter option 3:")
+            else:
+                await message.reply_text("❌ Please enter text for option 2.")
 
         elif step == 'option_3':
-            state['current_question']['options'].append(message.text)
-            state['step'] = 'option_4'
-            await message.reply_text("📝 Enter option 4:")
+            if message.text:
+                state['current_question']['options'].append(message.text)
+                state['step'] = 'option_4'
+                await message.reply_text("📝 Enter option 4:")
+            else:
+                await message.reply_text("❌ Please enter text for option 3.")
 
         elif step == 'option_4':
-            state['current_question']['options'].append(message.text)
-            state['step'] = 'correct_answer'
+            if message.text:
+                state['current_question']['options'].append(message.text)
+                state['step'] = 'correct_answer'
 
-            # Show options for correct answer selection
-            options = state['current_question']['options']
-            keyboard = []
-            for i, option in enumerate(options):
-                keyboard.append([InlineKeyboardButton(f"{i+1}. {option}", callback_data=f"quiz_correct_{i}")])
+                # Show options for correct answer selection
+                options = state['current_question']['options']
+                keyboard = []
+                for i, option in enumerate(options):
+                    keyboard.append([InlineKeyboardButton(f"{i+1}. {option}", callback_data=f"quiz_correct_{i}")])
 
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await message.reply_text(
-                "✅ Which one is the correct answer?",
-                reply_markup=reply_markup
-            )
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await message.reply_text(
+                    "✅ Which one is the correct answer?",
+                    reply_markup=reply_markup
+                )
+            else:
+                await message.reply_text("❌ Please enter text for option 4.")
 
     except Exception as e:
         print(f"Error in quiz setup: {e}")
         await message.reply_text("❌ An error occurred. Please try again.")
 
-async def save_quiz_question(user_id, question_data):
-    """Save a quiz question to MongoDB"""
+async def create_quiz_set(user_id, quiz_name, quiz_description):
+    """Create a new quiz set in MongoDB"""
     try:
-        # Get the next question number
-        last_question = await quiz_collection.find().sort("_id", -1).limit(1).to_list(length=1)
-        question_num = 1
+        quiz_set_doc = {
+            "quiz_name": quiz_name,
+            "description": quiz_description,
+            "created_by": user_id,
+            "created_at": datetime.datetime.utcnow(),
+            "question_count": 0
+        }
 
-        if last_question:
-            for key in last_question[0].keys():
-                if key.startswith('question') and key[8:].isdigit():
-                    question_num = max(question_num, int(key[8:]) + 1)
+        result = await quiz_collection.insert_one(quiz_set_doc)
+        print(f"Quiz set created with ID: {result.inserted_id}")
+        return result.inserted_id  # Return ObjectId directly, not string
+    except Exception as e:
+        print(f"Error creating quiz set: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
-        # Create the question document
+async def save_quiz_question(user_id, question_data, quiz_set_id):
+    """Save a quiz question to MongoDB with media support"""
+    try:
+        from bson import ObjectId
+
+        # Convert quiz_set_id to ObjectId if it's a string
+        if isinstance(quiz_set_id, str):
+            quiz_set_id = ObjectId(quiz_set_id)
+
+        # Get current question count for this quiz set
+        quiz_set = await quiz_collection.find_one({"_id": quiz_set_id})
+        if not quiz_set:
+            print(f"Quiz set not found: {quiz_set_id}")
+            return False
+
+        question_num = quiz_set.get('question_count', 0) + 1
+
+        # Create the question document with media support
         question_doc = {
-            f"question{question_num}": question_data['text'],
+            "quiz_set_id": quiz_set_id,
+            "question_number": question_num,
+            "question_text": question_data['text'],
             "options": question_data['options'],
-            "correct": question_data['correct'],
+            "correct_answer": question_data['correct'],
+            "media_type": question_data.get('media_type'),
+            "media_file_id": question_data.get('media_file_id'),
             "used": False,
             "created_by": user_id,
             "created_at": datetime.datetime.utcnow()
         }
 
-        await quiz_collection.insert_one(question_doc)
+        # Insert question
+        result = await quiz_collection.insert_one(question_doc)
+        print(f"Question saved with ID: {result.inserted_id}")
+
+        # Update quiz set question count
+        update_result = await quiz_collection.update_one(
+            {"_id": quiz_set_id},
+            {"$set": {"question_count": question_num}}
+        )
+        print(f"Quiz set updated: {update_result.modified_count} documents modified")
+
         return True
 
     except Exception as e:
         print(f"Error saving quiz question: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
+async def delete_last_quiz_question(user_id, quiz_set_id):
+    """Delete the last question from a quiz set"""
+    try:
+        from bson import ObjectId
+
+        # Convert quiz_set_id to ObjectId if it's a string
+        if isinstance(quiz_set_id, str):
+            quiz_set_id = ObjectId(quiz_set_id)
+
+        # Find the last question for this quiz set
+        last_question = await quiz_collection.find_one(
+            {"quiz_set_id": quiz_set_id, "created_by": user_id},
+            sort=[("question_number", -1)]
+        )
+
+        if not last_question:
+            print(f"No questions found for quiz set: {quiz_set_id}")
+            return False, 0
+
+        question_num = last_question['question_number']
+
+        # Delete the question
+        delete_result = await quiz_collection.delete_one({"_id": last_question['_id']})
+        print(f"Question deleted: {delete_result.deleted_count} documents")
+
+        # Update quiz set question count
+        new_count = question_num - 1
+        update_result = await quiz_collection.update_one(
+            {"_id": quiz_set_id},
+            {"$set": {"question_count": new_count}}
+        )
+        print(f"Quiz set question count updated: {update_result.modified_count} documents")
+
+        return True, question_num
+
+    except Exception as e:
+        print(f"Error deleting last quiz question: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, 0
 
 async def show_quiz_results(bot, chat_id, scores):
     """Show final quiz results"""
@@ -2782,8 +3304,107 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+    # Handle quiz set selection
+    if query.data.startswith("select_quiz_set_"):
+        quiz_set_id_str = query.data.split("_", 3)[3]
+        chat_id = query.message.chat_id
+
+        try:
+            from bson import ObjectId
+
+            # Convert string ID to ObjectId
+            quiz_set_id = ObjectId(quiz_set_id_str)
+
+            # Get quiz set details
+            quiz_set = await quiz_collection.find_one({"_id": quiz_set_id})
+            if not quiz_set:
+                await query.edit_message_text("❌ Quiz set not found.")
+                return
+
+            # Get questions for this quiz set
+            questions = await quiz_collection.find({
+                "quiz_set_id": quiz_set_id,
+                "question_text": {"$exists": True}
+            }).to_list(length=None)
+
+            if not questions:
+                await query.edit_message_text("❌ No questions found in this quiz set.")
+                return
+
+            quiz_name = quiz_set['quiz_name']
+            description = quiz_set.get('description', 'No description')
+            question_count = len(questions)
+
+            keyboard = [
+                [InlineKeyboardButton("✅ Start Quiz", callback_data=f"start_quiz_set_{quiz_set_id}_{chat_id}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_quiz_{chat_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                f"🎯 **Quiz Set Selected**\n\n"
+                f"📝 **Name:** {quiz_name}\n"
+                f"📋 **Description:** {description}\n"
+                f"🎯 **Questions:** {question_count}\n"
+                f"⏱️ **Time per question:** 30 seconds\n\n"
+                f"Ready to start the quiz?",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+
+        except Exception as e:
+            print(f"Error selecting quiz set: {e}")
+            await query.edit_message_text("❌ Error loading quiz set.")
+
+    # Handle quiz set start confirmation
+    elif query.data.startswith("start_quiz_set_"):
+        parts = query.data.split("_")
+        quiz_set_id_str = parts[3]
+        chat_id = int(parts[4])
+
+        try:
+            from bson import ObjectId
+
+            # Convert string ID to ObjectId
+            quiz_set_id = ObjectId(quiz_set_id_str)
+
+            # Get questions for this quiz set
+            questions = await quiz_collection.find({
+                "quiz_set_id": quiz_set_id,
+                "question_text": {"$exists": True}
+            }).sort("question_number", 1).to_list(length=None)
+
+            if not questions:
+                await query.edit_message_text("❌ No questions found in this quiz set.")
+                return
+
+            # Mark quiz set as used
+            await quiz_collection.update_one(
+                {"_id": quiz_set_id},
+                {"$set": {"used": True}}
+            )
+
+            # Set up quiz session
+            active_quizzes[chat_id] = {
+                'questions': questions,
+                'current_index': 0,
+                'scores': {},
+                'total_questions': len(questions),
+                'question_time': 30,
+                'poll_id': None,
+                'countdown_message': None,
+                'quiz_set_id': quiz_set_id
+            }
+
+            await query.edit_message_text("🎯 **Quiz Starting!**", parse_mode='Markdown')
+            await start_quiz_countdown(context.bot, chat_id)
+
+        except Exception as e:
+            print(f"Error starting quiz set: {e}")
+            await query.edit_message_text("❌ Error starting quiz.")
+
     # Handle question count selection for quiz
-    if query.data.startswith("quiz_select_"):
+    elif query.data.startswith("quiz_select_"):
         parts = query.data.split("_")
         requested_count = int(parts[2])
         chat_id = int(parts[3])
@@ -2916,7 +3537,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if available_key in quiz_settings:
             del quiz_settings[available_key]
 
-        await query.edit_message_text("❌ Quiz cancelled.")
+        await query.edit_message_text("❌ **Quiz cancelled.** Quiz was not started.", parse_mode='Markdown')
 
     # Handle quiz stop confirmation
     elif query.data.startswith("quiz_stop_confirm_"):
@@ -3045,6 +3666,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Will add {question_count} questions.\n\n📝 **Question 1/{question_count}**\nEnter the question text:\n\n💡 **Tip:** Send /save_setup anytime to exit question adding mode and return to normal chat."
         )
 
+    # Handle media selection
+    elif query.data.startswith("media_"):
+        user_id = query.from_user.id
+        media_type = query.data.split("_")[1]
+
+        if user_id not in quiz_user_states:
+            await query.edit_message_text("❌ Session expired.")
+            return
+
+        state = quiz_user_states[user_id]
+
+        if media_type == "skip":
+            state['step'] = 'option_1'
+            await query.edit_message_text("⏭️ **Media skipped!** Now enter option 1:")
+        elif media_type in ["photo", "audio", "video"]:
+            state['step'] = 'awaiting_media'
+            state['awaiting_media_type'] = media_type
+
+            media_instructions = {
+                "photo": "📷 **Send a photo** for this question:",
+                "audio": "🎵 **Send an audio file or voice message** for this question:",
+                "video": "🎬 **Send a video file** for this question:"
+            }
+
+            await query.edit_message_text(
+                f"{media_instructions[media_type]}\n\n💡 Use /skip to continue without media.",
+                parse_mode='Markdown'
+            )
+
     # Handle correct answer selection
     elif query.data.startswith("quiz_correct_"):
         user_id = query.from_user.id
@@ -3062,30 +3712,60 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Set correct answer
         state['current_question']['correct'] = state['current_question']['options'][correct_index]
 
-        # Save question to database
-        success = await save_quiz_question(user_id, state['current_question'])
+        # Save question to database with quiz set ID
+        quiz_set_id = state.get('quiz_set_id')
+        if not quiz_set_id:
+            await query.edit_message_text("❌ Quiz set not found.")
+            return
+
+        success = await save_quiz_question(user_id, state['current_question'], quiz_set_id)
 
         if success:
             current_num = state['current_question_num']
-            total_num = state['total_questions']
 
-            if current_num < total_num:
-                # Move to next question
-                state['current_question_num'] += 1
-                state['step'] = 'question_text'
-                await query.edit_message_text(
-                    f"✅ Question {current_num} saved!\n\n📝 **Question {current_num + 1}/{total_num}**\nEnter the question text:\n\n💡 **Tip:** Send /save_setup anytime to exit question adding mode."
-                )
-            else:
-                # All questions completed
-                await query.edit_message_text(
-                    f"🎉 **All {total_num} questions saved successfully!**\n\nYou can now use /quiz in group chats to start a quiz."
-                )
-                del quiz_user_states[user_id]
-                if user_id in quiz_settings:
-                    del quiz_settings[user_id]
+            # Move to next question
+            state['current_question_num'] += 1
+            state['step'] = 'question_text'
+
+            # Create command buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("💾 /save_setup", callback_data="cmd_save_setup"),
+                    InlineKeyboardButton("⏭️ /skip", callback_data="cmd_skip")
+                ],
+                [InlineKeyboardButton("↩️ /undo", callback_data="cmd_undo")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                f"✅ **Question {current_num} saved!**\n\n"
+                f"🎯 **Question {current_num + 1}**\n"
+                f"Enter the question text:\n\n"
+                f"💡 **Quick Commands:**",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
         else:
             await query.edit_message_text("❌ Failed to save question. Please try again.")
+
+    # Handle command button clicks
+    elif query.data == "cmd_save_setup":
+        # Create a fake message object to simulate /save_setup command
+        user_id = query.from_user.id
+        if user_id in quiz_user_states:
+            await save_setup_command_from_button(query, context)
+
+    elif query.data == "cmd_skip":
+        # Create a fake message object to simulate /skip command
+        user_id = query.from_user.id
+        if user_id in quiz_user_states:
+            await skip_command_from_button(query, context)
+
+    elif query.data == "cmd_undo":
+        # Create a fake message object to simulate /undo command
+        user_id = query.from_user.id
+        if user_id in quiz_user_states:
+            await undo_command_from_button(query, context)
 
 
 
@@ -3176,8 +3856,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_image_results_to_chat(context.bot, chat_id, search_query, page)
         return
 
+    # Handle quiz cancellation first (before general cancel handler)
+    elif query.data.startswith("cancel_quiz_"):
+        chat_id = int(query.data.split("_")[2])
+        await query.edit_message_text("❌ **Quiz cancelled.** Quiz was not started.")
+
     # Handle group selection for message forwarding
-    if query.data.startswith("send_"):
+    elif query.data.startswith("send_"):
         parts = query.data.split("_", 2)  # Split into max 3 parts
         group_key = parts[1]  # This is now the chat_id directly
         message_id = int(parts[2])
@@ -3371,9 +4056,12 @@ app.add_handler(CommandHandler("filter", filter_command))
 app.add_handler(CommandHandler("del", del_filter_command))
 app.add_handler(CommandHandler("filters", filters_list_command))
 app.add_handler(CommandHandler("quiz", quiz_command))
+app.add_handler(MessageHandler(filters.Regex(r'^/quiz_[a-f0-9]{24}$'), quiz_id_command))
 app.add_handler(CommandHandler("set_quiz", set_quiz_command))
 app.add_handler(CommandHandler("stop_quiz", stop_quiz_command))
 app.add_handler(CommandHandler("save_setup", save_setup_command))
+app.add_handler(CommandHandler("skip", skip_command))
+app.add_handler(CommandHandler("undo", undo_command))
 app.add_handler(CommandHandler("start", start_command))
 
 app.add_handler(MessageHandler(filters.Regex(r'^\.mute$'), mute_command))
